@@ -1,0 +1,58 @@
+name: Backend Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # ── Docker build + push (adapt to your registry) ──────────────────────────
+      # - name: Build Docker image
+      #   run: docker build -t your-registry/ai-survival-os-backend:${{ github.sha }} .
+
+      # - name: Push Docker image
+      #   run: docker push your-registry/ai-survival-os-backend:${{ github.sha }}
+
+      # ── Render deployment example ──────────────────────────────────────────────
+      # - name: Deploy to Render
+      #   run: |
+      #     curl -X POST \
+      #       -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+      #       "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys"
+
+      # ── Railway deployment example ─────────────────────────────────────────────
+      # - name: Deploy to Railway
+      #   uses: bervProject/railway-deploy@main
+      #   with:
+      #     railway_token: ${{ secrets.RAILWAY_TOKEN }}
+      #     service: ai-survival-os-backend
+
+      - name: Run migrations
+        run: pnpm db:migrate:prod
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

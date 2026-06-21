@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BANNED
+}
+
+enum EventStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+// ─── User ────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String     @map("password_hash")
+  displayName  String     @map("display_name")
+  avatarUrl    String?    @map("avatar_url")
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  profile       UserProfile?
+  refreshTokens RefreshToken[]
+  events        Event[]
+
+  @@map("users")
+}
+
+model UserProfile {
+  id                   String   @id @default(cuid())
+  userId               String   @unique @map("user_id")
+  locationCity         String?  @map("location_city")
+  timezone             String   @default("Asia/Taipei")
+  currency             String   @default("TWD")
+  monthlyBudget        Decimal? @map("monthly_budget") @db.Decimal(12, 2)
+  chineseLevel         String?  @map("chinese_level")
+  dietPreference       String?  @map("diet_preference")
+  livingStatus         String?  @map("living_status")
+  familySupportMonthly Decimal? @map("family_support_monthly") @db.Decimal(12, 2)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// ─── Event Store ─────────────────────────────────────────────────────────────
+
+model Event {
+  id           String      @id @default(cuid())
+  userId       String?     @map("user_id")
+  eventType    String      @map("event_type")
+  sourceModule String      @map("source_module")
+  payloadJson  Json        @map("payload_json")
+  status       EventStatus @default(PENDING)
+  processedAt  DateTime?   @map("processed_at")
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@map("events")
+}
