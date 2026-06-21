@@ -129,6 +129,53 @@ enum TaskStatus {
   OVERDUE
 }
 
+// AI enums
+enum AISuggestionType {
+  FINANCE
+  GOAL
+  LEARNING
+  SCHEDULE
+  LIFESTYLE
+  SYSTEM
+}
+
+enum AISuggestionPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum AISuggestionStatus {
+  ACTIVE
+  DISMISSED
+  ACCEPTED
+  EXPIRED
+}
+
+// Notification enums
+enum NotificationType {
+  TASK_REMINDER
+  GOAL_REMINDER
+  BUDGET_WARNING
+  DAILY_VOCABULARY
+  MEAL_PREPARATION
+  INGREDIENT_EXPIRY
+  HSK_STUDY
+  ARC_RENEWAL
+  INSURANCE_RENEWAL
+  WEEKLY_SUMMARY
+  SYSTEM
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  ARCHIVED
+  SENT
+  FAILED
+}
+
 // ─── User ────────────────────────────────────────────────────────────────────
 
 model User {
@@ -155,9 +202,14 @@ model User {
   vocabProgress     UserVocabularyProgress[]
   learningPlans     LearningPlan[]
   reviewSessions    ReviewSession[]
-  fixedEvents       FixedEvent[]
-  tasks             Task[]
-  schedulePlans     SchedulePlan[]
+  fixedEvents              FixedEvent[]
+  tasks                    Task[]
+  schedulePlans            SchedulePlan[]
+  aiProfile                AIProfile?
+  aiSuggestions            AISuggestion[]
+  recommendationLogs       RecommendationLog[]
+  notifications            Notification[]
+  notificationPreference   NotificationPreference?
 
   @@map("users")
 }
@@ -493,4 +545,96 @@ model SchedulePlan {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("schedule_plans")
+}
+
+// ─── AI ──────────────────────────────────────────────────────────────────────
+
+model AIProfile {
+  id                        String   @id @default(cuid())
+  userId                    String   @unique @map("user_id")
+  financialHealthScore      Int      @default(0) @map("financial_health_score")
+  learningConsistencyScore  Int      @default(0) @map("learning_consistency_score")
+  nutritionScore            Int      @default(0) @map("nutrition_score")
+  productivityScore         Int      @default(0) @map("productivity_score")
+  goalRiskScore             Int      @default(0) @map("goal_risk_score")
+  profileJson               Json?    @map("profile_json")
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_profiles")
+}
+
+model AISuggestion {
+  id             String               @id @default(cuid())
+  userId         String               @map("user_id")
+  type           AISuggestionType
+  title          String
+  message        String
+  priority       AISuggestionPriority @default(MEDIUM)
+  sourceModule   String               @map("source_module")
+  sourceEntityId String?              @map("source_entity_id")
+  status         AISuggestionStatus   @default(ACTIVE)
+  metadataJson   Json?                @map("metadata_json")
+  createdAt      DateTime             @default(now()) @map("created_at")
+  expiresAt      DateTime?            @map("expires_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ai_suggestions")
+}
+
+model RecommendationLog {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  requestType String   @map("request_type")
+  inputJson   Json?    @map("input_json")
+  outputJson  Json?    @map("output_json")
+  provider    String   @default("deterministic")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("recommendation_logs")
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id           String             @id @default(cuid())
+  userId       String             @map("user_id")
+  type         NotificationType
+  title        String
+  message      String
+  status       NotificationStatus @default(UNREAD)
+  scheduledAt  DateTime?          @map("scheduled_at")
+  sentAt       DateTime?          @map("sent_at")
+  metadataJson Json?              @map("metadata_json")
+  createdAt    DateTime           @default(now()) @map("created_at")
+  updatedAt    DateTime           @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id                String   @id @default(cuid())
+  userId            String   @unique @map("user_id")
+  taskReminder      Boolean  @default(true) @map("task_reminder")
+  goalReminder      Boolean  @default(true) @map("goal_reminder")
+  budgetWarning     Boolean  @default(true) @map("budget_warning")
+  dailyVocabulary   Boolean  @default(true) @map("daily_vocabulary")
+  weeklySummary     Boolean  @default(true) @map("weekly_summary")
+  pushEnabled       Boolean  @default(false) @map("push_enabled")
+  emailEnabled      Boolean  @default(false) @map("email_enabled")
+  quietHoursStart   String?  @map("quiet_hours_start")
+  quietHoursEnd     String?  @map("quiet_hours_end")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
 }
