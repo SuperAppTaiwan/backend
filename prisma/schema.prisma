@@ -82,6 +82,53 @@ enum GoalRiskLevel {
   HIGH
 }
 
+// Learning enums
+enum VocabularyStatus {
+  NEW
+  LEARNING
+  LEARNED
+  REVIEW
+}
+
+enum LearningPlanStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+enum ReviewResult {
+  AGAIN
+  HARD
+  GOOD
+  EASY
+}
+
+// Schedule enums
+enum FixedEventType {
+  CLASS
+  WORK
+  STUDY
+  PERSONAL
+  ADMINISTRATIVE
+  GENERAL
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  OVERDUE
+}
+
 // ─── User ────────────────────────────────────────────────────────────────────
 
 model User {
@@ -105,6 +152,12 @@ model User {
   goals             Goal[]
   goalMilestones    GoalMilestone[]
   goalForecasts     GoalForecast[]
+  vocabProgress     UserVocabularyProgress[]
+  learningPlans     LearningPlan[]
+  reviewSessions    ReviewSession[]
+  fixedEvents       FixedEvent[]
+  tasks             Task[]
+  schedulePlans     SchedulePlan[]
 
   @@map("users")
 }
@@ -305,4 +358,139 @@ model GoalForecast {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("goal_forecasts")
+}
+
+// ─── Learning ────────────────────────────────────────────────────────────────
+
+model Vocabulary {
+  id                    String   @id @default(cuid())
+  traditional           String
+  simplified            String
+  pinyin                String
+  meaningVi             String   @map("meaning_vi")
+  meaningEn             String?  @map("meaning_en")
+  exampleTraditional    String?  @map("example_traditional")
+  exampleSimplified     String?  @map("example_simplified")
+  examplePinyin         String?  @map("example_pinyin")
+  exampleMeaningVi      String?  @map("example_meaning_vi")
+  hskLevel              Int?     @map("hsk_level")
+  topic                 String?
+  source                String   @default("system")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  userProgress   UserVocabularyProgress[]
+  reviewSessions ReviewSession[]
+
+  @@map("vocabularies")
+}
+
+model UserVocabularyProgress {
+  id             String           @id @default(cuid())
+  userId         String           @map("user_id")
+  vocabularyId   String           @map("vocabulary_id")
+  status         VocabularyStatus @default(NEW)
+  familiarity    Int              @default(0)
+  reviewCount    Int              @default(0) @map("review_count")
+  lastReviewedAt DateTime?        @map("last_reviewed_at")
+  nextReviewAt   DateTime?        @map("next_review_at")
+  learnedAt      DateTime?        @map("learned_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabulary Vocabulary @relation(fields: [vocabularyId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, vocabularyId])
+  @@map("user_vocabulary_progress")
+}
+
+model LearningPlan {
+  id             String             @id @default(cuid())
+  userId         String             @map("user_id")
+  title          String
+  targetLevel    String?            @map("target_level")
+  dailyWordTarget Int               @default(2) @map("daily_word_target")
+  startDate      DateTime           @map("start_date")
+  endDate        DateTime?          @map("end_date")
+  status         LearningPlanStatus @default(ACTIVE)
+  metadataJson   Json?              @map("metadata_json")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  updatedAt      DateTime           @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("learning_plans")
+}
+
+model ReviewSession {
+  id           String       @id @default(cuid())
+  userId       String       @map("user_id")
+  vocabularyId String?      @map("vocabulary_id")
+  result       ReviewResult
+  reviewedAt   DateTime     @default(now()) @map("reviewed_at")
+  score        Int?
+  note         String?
+  createdAt    DateTime     @default(now()) @map("created_at")
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vocabulary Vocabulary? @relation(fields: [vocabularyId], references: [id], onDelete: SetNull)
+
+  @@map("review_sessions")
+}
+
+// ─── Schedule ────────────────────────────────────────────────────────────────
+
+model FixedEvent {
+  id             String         @id @default(cuid())
+  userId         String         @map("user_id")
+  title          String
+  description    String?
+  location       String?
+  startTime      DateTime       @map("start_time")
+  endTime        DateTime       @map("end_time")
+  timezone       String         @default("Asia/Taipei")
+  recurrenceRule String?        @map("recurrence_rule")
+  eventType      FixedEventType @default(GENERAL) @map("event_type")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("fixed_events")
+}
+
+model Task {
+  id               String       @id @default(cuid())
+  userId           String       @map("user_id")
+  title            String
+  description      String?
+  priority         TaskPriority @default(MEDIUM)
+  status           TaskStatus   @default(TODO)
+  deadline         DateTime?
+  estimatedMinutes Int?         @map("estimated_minutes")
+  scheduledStart   DateTime?    @map("scheduled_start")
+  scheduledEnd     DateTime?    @map("scheduled_end")
+  sourceModule     String       @default("manual") @map("source_module")
+  sourceEntityId   String?      @map("source_entity_id")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("tasks")
+}
+
+model SchedulePlan {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  planDate  DateTime @map("plan_date")
+  summary   String?
+  planJson  Json     @map("plan_json")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("schedule_plans")
 }

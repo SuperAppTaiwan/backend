@@ -8,6 +8,8 @@ import { AuthModule } from './modules/auth/auth.module.js';
 import { ProfileModule } from './modules/profile/profile.module.js';
 import { FinanceModule } from './modules/finance/finance.module.js';
 import { GoalsModule } from './modules/goals/goals.module.js';
+import { LearningModule } from './modules/learning/learning.module.js';
+import { ScheduleModule } from './modules/schedule/schedule.module.js';
 
 @Module({
   imports: [
@@ -22,6 +24,8 @@ import { GoalsModule } from './modules/goals/goals.module.js';
     ProfileModule,
     FinanceModule,
     GoalsModule,
+    LearningModule,
+    ScheduleModule,
   ],
 })
 export class AppModule {}
