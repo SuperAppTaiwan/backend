@@ -135,8 +135,55 @@ enum AISuggestionType {
   GOAL
   LEARNING
   SCHEDULE
+  NUTRITION
   LIFESTYLE
+  HEALTH
   SYSTEM
+}
+
+// Food enums
+enum FoodCategory {
+  VEGETABLE
+  FRUIT
+  MEAT
+  SEAFOOD
+  DAIRY
+  GRAIN
+  LEGUME
+  CONDIMENT
+  BEVERAGE
+  SNACK
+  FROZEN
+  OTHER
+}
+
+enum UnitOfMeasure {
+  GRAM
+  KG
+  ML
+  LITER
+  PIECE
+  PACK
+  CAN
+  BOTTLE
+  BOX
+  TABLESPOON
+  TEASPOON
+  CUP
+  OTHER
+}
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACK
+}
+
+enum ShoppingListStatus {
+  ACTIVE
+  COMPLETED
+  ARCHIVED
 }
 
 enum AISuggestionPriority {
@@ -210,6 +257,10 @@ model User {
   recommendationLogs       RecommendationLog[]
   notifications            Notification[]
   notificationPreference   NotificationPreference?
+  ingredients              Ingredient[]
+  recipes                  Recipe[]
+  mealPlans                MealPlan[]
+  shoppingLists            ShoppingList[]
 
   @@map("users")
 }
@@ -637,4 +688,98 @@ model NotificationPreference {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("notification_preferences")
+}
+
+// ─── Food ─────────────────────────────────────────────────────────────────────
+
+model Ingredient {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  name        String
+  category    FoodCategory  @default(OTHER)
+  unit        UnitOfMeasure @default(PIECE)
+  quantity    Decimal       @default(0) @db.Decimal(10, 3)
+  expiresAt   DateTime?     @map("expires_at")
+  purchasedAt DateTime?     @map("purchased_at")
+  cost        Decimal?      @db.Decimal(10, 2)
+  location    String?
+  notes       String?
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("ingredients")
+}
+
+model Recipe {
+  id              String        @id @default(cuid())
+  userId          String        @map("user_id")
+  title           String
+  description     String?
+  servings        Int           @default(1)
+  prepMinutes     Int           @default(0) @map("prep_minutes")
+  cookMinutes     Int           @default(0) @map("cook_minutes")
+  isPublic        Boolean       @default(false) @map("is_public")
+  category        FoodCategory  @default(OTHER)
+  ingredientsJson Json          @map("ingredients_json")
+  stepsJson       Json          @map("steps_json")
+  tagsJson        Json?         @map("tags_json")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mealPlans MealPlan[]
+
+  @@map("recipes")
+}
+
+model MealPlan {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  planDate   DateTime @map("plan_date")
+  mealType   MealType @map("meal_type")
+  recipeId   String?  @map("recipe_id")
+  customMeal String?  @map("custom_meal")
+  servings   Int      @default(1)
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe Recipe? @relation(fields: [recipeId], references: [id], onDelete: SetNull)
+
+  @@map("meal_plans")
+}
+
+model ShoppingList {
+  id        String             @id @default(cuid())
+  userId    String             @map("user_id")
+  name      String
+  status    ShoppingListStatus @default(ACTIVE)
+  notes     String?
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+
+  user  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items ShoppingListItem[]
+
+  @@map("shopping_lists")
+}
+
+model ShoppingListItem {
+  id             String        @id @default(cuid())
+  shoppingListId String        @map("shopping_list_id")
+  ingredientName String        @map("ingredient_name")
+  quantity       Decimal       @default(1) @db.Decimal(10, 3)
+  unit           UnitOfMeasure @default(PIECE)
+  isPurchased    Boolean       @default(false) @map("is_purchased")
+  estimatedCost  Decimal?      @map("estimated_cost") @db.Decimal(10, 2)
+  notes          String?
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  shoppingList ShoppingList @relation(fields: [shoppingListId], references: [id], onDelete: Cascade)
+
+  @@map("shopping_list_items")
 }
