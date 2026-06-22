@@ -13,6 +13,7 @@ import { ScheduleModule } from './modules/schedule/schedule.module.js';
 import { AIModule } from './modules/ai/ai.module.js';
 import { NotificationsModule } from './modules/notifications/notifications.module.js';
 import { FoodModule } from './modules/food/food.module.js';
+import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { FoodModule } from './modules/food/food.module.js';
     AIModule,
     NotificationsModule,
     FoodModule,
+    KnowledgeModule,
   ],
 })
 export class AppModule {}

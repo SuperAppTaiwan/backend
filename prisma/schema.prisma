@@ -186,6 +186,26 @@ enum ShoppingListStatus {
   ARCHIVED
 }
 
+// Knowledge enums
+enum KnowledgeCategory {
+  LEGAL
+  HEALTHCARE
+  HOUSING
+  BANKING
+  TRANSPORTATION
+  FOOD_CULTURE
+  EDUCATION
+  EMPLOYMENT
+  EMERGENCY
+  GENERAL
+}
+
+enum KnowledgeDifficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
 enum AISuggestionPriority {
   LOW
   MEDIUM
@@ -261,6 +281,8 @@ model User {
   recipes                  Recipe[]
   mealPlans                MealPlan[]
   shoppingLists            ShoppingList[]
+  knowledgeArticles        KnowledgeArticle[]
+  knowledgeBookmarks       KnowledgeBookmark[]
 
   @@map("users")
 }
@@ -782,4 +804,41 @@ model ShoppingListItem {
   shoppingList ShoppingList @relation(fields: [shoppingListId], references: [id], onDelete: Cascade)
 
   @@map("shopping_list_items")
+}
+
+// ─── Knowledge ────────────────────────────────────────────────────────────────
+
+model KnowledgeArticle {
+  id                   String              @id @default(cuid())
+  authorId             String              @map("author_id")
+  title                String
+  summary              String
+  content              String
+  category             KnowledgeCategory   @default(GENERAL)
+  difficulty           KnowledgeDifficulty @default(BEGINNER)
+  tagsJson             Json?               @map("tags_json")
+  estimatedReadMinutes Int                 @default(5) @map("estimated_read_minutes")
+  isPublished          Boolean             @default(true) @map("is_published")
+  viewCount            Int                 @default(0) @map("view_count")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  author    User                @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  bookmarks KnowledgeBookmark[]
+
+  @@map("knowledge_articles")
+}
+
+model KnowledgeBookmark {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  articleId String   @map("article_id")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  article KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, articleId])
+  @@map("knowledge_bookmarks")
 }
