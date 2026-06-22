@@ -63,3 +63,17 @@ export class CreateNotificationDto {
   @IsString()
   declare message: string;
 }
+
+export class RegisterPushTokenDto {
+  @ApiProperty({ description: 'Expo push token (ExponentPushToken[xxxx])' })
+  @IsString()
+  declare token: string;
+
+  @ApiProperty({ description: 'Platform: IOS, ANDROID, or WEB' })
+  @IsString()
+  declare platform: string;
+
+  @ApiProperty({ description: 'Unique device identifier' })
+  @IsString()
+  declare deviceId: string;
+}

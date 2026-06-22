@@ -1,6 +1,17 @@
+jest.mock('expo-server-sdk', () => {
+  const mockInstance = {
+    sendPushNotificationsAsync: jest.fn().mockResolvedValue([]),
+    chunkPushNotifications: jest.fn().mockReturnValue([]),
+  };
+  const MockExpoClass = jest.fn().mockImplementation(() => mockInstance);
+  (MockExpoClass as any).isExpoPushToken = jest.fn().mockReturnValue(true);
+  return { __esModule: true, default: MockExpoClass };
+});
+
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotificationsService } from './notifications.service.js';
+import { PushService } from './push.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 import { NotificationType } from '@prisma/client';
@@ -60,11 +71,18 @@ describe('NotificationsService', () => {
       },
     };
 
+    const mockPush = {
+      registerToken: jest.fn(),
+      sendPush: jest.fn().mockResolvedValue(undefined),
+      isInQuietHours: jest.fn().mockResolvedValue(false),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         NotificationsService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: EventsService, useValue: { publish: jest.fn() } },
+        { provide: PushService, useValue: mockPush },
       ],
     }).compile();
 

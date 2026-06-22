@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AuthUser } from '../auth/strategies/jwt.strategy.js';
 import { NotificationsService } from './notifications.service.js';
-import { UpdateNotificationPreferenceDto } from './dto/notification.dto.js';
+import { RegisterPushTokenDto, UpdateNotificationPreferenceDto } from './dto/notification.dto.js';
 
 @ApiTags('Notifications')
 @ApiBearerAuth()
@@ -12,6 +12,14 @@ import { UpdateNotificationPreferenceDto } from './dto/notification.dto.js';
 @Controller('notifications')
 export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
+
+  @Post('push-token')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Register or update device push token' })
+  @ApiResponse({ status: 200, description: 'Push token registered' })
+  registerPushToken(@CurrentUser() user: AuthUser, @Body() dto: RegisterPushTokenDto) {
+    return this.notificationsService.registerPushToken(user.userId, dto.token, dto.platform, dto.deviceId);
+  }
 
   @Get()
   @ApiOperation({ summary: 'List notifications' })

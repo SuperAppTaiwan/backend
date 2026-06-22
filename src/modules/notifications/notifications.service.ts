@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { NotificationType } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
+import { PushService } from './push.service.js';
 import type { UpdateNotificationPreferenceDto } from './dto/notification.dto.js';
 
 @Injectable()
@@ -9,7 +10,14 @@ export class NotificationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
+    private readonly push: PushService,
   ) {}
+
+  // ─── Push Tokens ─────────────────────────────────────────────────────────────
+
+  async registerPushToken(userId: string, token: string, platform: string, deviceId: string) {
+    return this.push.registerToken(userId, token, platform, deviceId);
+  }
 
   // ─── Preferences ─────────────────────────────────────────────────────────────
 
@@ -46,6 +54,16 @@ export class NotificationsService {
       data: { userId, type, title, message },
     });
     await this.events.publish({ userId, eventType: EventType.NOTIFICATION_CREATED, sourceModule: 'notifications', payload: { id: notification.id, type } });
+
+    // Send push notification if user has push enabled and not in quiet hours
+    const prefs = await this.prisma.notificationPreference.findUnique({ where: { userId } });
+    if (prefs?.pushEnabled) {
+      const inQuiet = await this.push.isInQuietHours(prefs.quietHoursStart, prefs.quietHoursEnd);
+      if (!inQuiet) {
+        this.push.sendPush(userId, title, message, { notificationId: notification.id, type }).catch(() => {});
+      }
+    }
+
     return notification;
   }
 
