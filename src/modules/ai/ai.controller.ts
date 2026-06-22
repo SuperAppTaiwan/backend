@@ -1,10 +1,10 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Post, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AuthUser } from '../auth/strategies/jwt.strategy.js';
 import { AIService } from './ai.service.js';
-import { ChatRequestDto } from './dto/ai.dto.js';
+import { ChatRequestDto, CreateConversationDto, SendMessageDto } from './dto/ai.dto.js';
 
 @ApiTags('AI')
 @ApiBearerAuth()
@@ -94,5 +94,45 @@ export class AIController {
   @ApiOperation({ summary: 'Get learning optimization suggestions' })
   optimizeLearning(@CurrentUser() user: AuthUser) {
     return this.aiService.optimizeLearning(user.userId);
+  }
+
+  // ─── Conversations ───────────────────────────────────────────────────────────
+
+  @Get('conversations')
+  @ApiOperation({ summary: 'List AI conversations' })
+  @ApiResponse({ status: 200, description: 'Conversations list' })
+  listConversations(@CurrentUser() user: AuthUser) {
+    return this.aiService.listConversations(user.userId);
+  }
+
+  @Post('conversations')
+  @ApiOperation({ summary: 'Create a new conversation' })
+  @ApiResponse({ status: 201, description: 'Conversation created' })
+  createConversation(@CurrentUser() user: AuthUser, @Body() dto: CreateConversationDto) {
+    return this.aiService.createConversation(user.userId, dto.title);
+  }
+
+  @Get('conversations/:id/messages')
+  @ApiOperation({ summary: 'Get conversation messages' })
+  @ApiResponse({ status: 200, description: 'Messages list' })
+  @ApiResponse({ status: 404, description: 'Conversation not found' })
+  getMessages(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.aiService.getConversationMessages(user.userId, id);
+  }
+
+  @Post('conversations/:id/messages')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send message and get AI response' })
+  @ApiResponse({ status: 200, description: 'AI response with message persisted' })
+  sendMessage(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: SendMessageDto) {
+    return this.aiService.sendConversationMessage(user.userId, id, dto.content);
+  }
+
+  @Delete('conversations/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a conversation' })
+  @ApiResponse({ status: 200, description: 'Conversation deleted' })
+  deleteConversation(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.aiService.deleteConversation(user.userId, id);
   }
 }

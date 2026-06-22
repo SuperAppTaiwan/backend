@@ -33,3 +33,18 @@ export class UpdateSuggestionStatusDto {
   @IsEnum(AISuggestionStatus)
   declare status: AISuggestionStatus;
 }
+
+export class CreateConversationDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  declare title?: string;
+}
+
+export class SendMessageDto {
+  @ApiProperty()
+  @IsString()
+  @MaxLength(4000)
+  declare content: string;
+}

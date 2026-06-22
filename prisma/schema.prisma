@@ -290,6 +290,7 @@ model User {
   knowledgeArticles        KnowledgeArticle[]
   knowledgeBookmarks       KnowledgeBookmark[]
   pushTokens               PushToken[]
+  conversations            Conversation[]
 
   @@map("users")
 }
@@ -848,6 +849,34 @@ model KnowledgeBookmark {
 
   @@unique([userId, articleId])
   @@map("knowledge_bookmarks")
+}
+
+// ─── AI Conversations ────────────────────────────────────────────────────────
+
+model Conversation {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  title     String   @default("Cuộc trò chuyện")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ConversationMessage[]
+
+  @@map("conversations")
+}
+
+model ConversationMessage {
+  id             String   @id @default(cuid())
+  conversationId String   @map("conversation_id")
+  role           String
+  content        String
+  provider       String?  @default("deterministic")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_messages")
 }
 
 // ─── Push Tokens ─────────────────────────────────────────────────────────────

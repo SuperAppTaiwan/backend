@@ -375,7 +375,104 @@ export class AIService {
     };
   }
 
-  // ─── Chat ─────────────────────────────────────────────────────────────────────
+  // ─── Conversations (persistent chat history) ──────────────────────────────────
+
+  async listConversations(userId: string) {
+    return this.prisma.conversation.findMany({
+      where: { userId },
+      include: { _count: { select: { messages: true } } },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+    });
+  }
+
+  async createConversation(userId: string, title?: string) {
+    const conversation = await this.prisma.conversation.create({
+      data: { userId, title: title ?? 'Cuộc trò chuyện mới' },
+    });
+    await this.events.publish({
+      userId,
+      eventType: EventType.CONVERSATION_CREATED,
+      sourceModule: 'ai',
+      payload: { conversationId: conversation.id },
+    });
+    return conversation;
+  }
+
+  async getConversationMessages(userId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({ where: { id: conversationId, userId } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+    return this.prisma.conversationMessage.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async sendConversationMessage(userId: string, conversationId: string, userContent: string) {
+    const conv = await this.prisma.conversation.findFirst({ where: { id: conversationId, userId } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+
+    // Persist user message
+    await this.prisma.conversationMessage.create({
+      data: { conversationId, role: 'user', content: userContent },
+    });
+
+    // Load conversation history for context
+    const history = await this.prisma.conversationMessage.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    });
+
+    const messages: AIChatMessage[] = history.map((m) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
+
+    // Get AI response
+    const provider = this.getProvider();
+    let result: { message: string; provider: string };
+    try {
+      result = await provider.chat(messages);
+    } catch {
+      result = await this.deterministicProvider.chat(messages);
+    }
+
+    // Persist assistant response
+    const assistantMsg = await this.prisma.conversationMessage.create({
+      data: { conversationId, role: 'assistant', content: result.message, provider: result.provider },
+    });
+
+    // Update conversation timestamp
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data: { updatedAt: new Date() },
+    });
+
+    await this.events.publish({
+      userId,
+      eventType: EventType.CONVERSATION_MESSAGE_SENT,
+      sourceModule: 'ai',
+      payload: { conversationId, provider: result.provider },
+    });
+
+    return { userMessage: userContent, assistantMessage: assistantMsg.content, provider: result.provider };
+  }
+
+  async deleteConversation(userId: string, conversationId: string) {
+    const conv = await this.prisma.conversation.findFirst({ where: { id: conversationId, userId } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+    await this.prisma.conversation.delete({ where: { id: conversationId } });
+    await this.events.publish({
+      userId,
+      eventType: EventType.CONVERSATION_DELETED,
+      sourceModule: 'ai',
+      payload: { conversationId },
+    });
+    return { message: 'Conversation deleted' };
+  }
+
+  // ─── Chat (stateless) ─────────────────────────────────────────────────────────
 
   async chat(userId: string, messages: AIChatMessage[]) {
     const provider = this.getProvider();
