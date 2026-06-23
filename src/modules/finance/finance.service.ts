@@ -455,9 +455,18 @@ export class FinanceService {
       this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: start, lt: end } } }),
     ]);
 
-    if (!budget) throw new NotFoundException('No budget set for the specified month');
-
     const totalExpense = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
+
+    if (!budget) {
+      return {
+        budget: null,
+        totalExpense,
+        remainingBudget: 0,
+        usedPercent: 0,
+        isExceeded: false,
+      };
+    }
+
     const budgetLimit = toNum(budget.totalLimit);
     const remainingBudget = budgetLimit - totalExpense;
     const usedPercent = budgetLimit > 0 ? Math.round((totalExpense / budgetLimit) * 100) : 0;

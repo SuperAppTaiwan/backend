@@ -225,11 +225,15 @@ describe('FinanceService', () => {
       expect(result.usedPercent).toBe(120);
     });
 
-    it('throws NotFoundException when no budget exists', async () => {
+    it('returns empty status when no budget exists', async () => {
       mockPrisma.budget.findFirst.mockResolvedValue(null);
       mockPrisma.expense.findMany.mockResolvedValue([]);
 
-      await expect(service.getBudgetStatus('u-1', 6, 2026)).rejects.toThrow(NotFoundException);
+      const result = await service.getBudgetStatus('u-1', 6, 2026);
+      expect(result.budget).toBeNull();
+      expect(result.totalExpense).toBe(0);
+      expect(result.usedPercent).toBe(0);
+      expect(result.isExceeded).toBe(false);
     });
   });
 
