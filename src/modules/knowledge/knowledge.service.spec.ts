@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { KnowledgeCategory } from '@prisma/client';
 import { KnowledgeService } from './knowledge.service.js';
+import { CreateArticleDto, UpdateArticleDto } from './dto/knowledge.dto.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 
@@ -70,7 +72,7 @@ describe('KnowledgeService', () => {
 
     it('filters by category', async () => {
       mockPrisma.knowledgeArticle.findMany.mockResolvedValue([mockArticle]);
-      await service.getArticles({ category: 'LEGAL' as any });
+      await service.getArticles({ category: KnowledgeCategory.LEGAL });
       expect(mockPrisma.knowledgeArticle.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ category: 'LEGAL' }) }),
       );
@@ -139,7 +141,7 @@ describe('KnowledgeService', () => {
       const dto = { title: 'Test', summary: 'Summary', content: 'Content' };
       mockPrisma.knowledgeArticle.create.mockResolvedValue({ ...mockArticle, ...dto });
 
-      const result = await service.createArticle(userId, dto as any);
+      const result = await service.createArticle(userId, dto as CreateArticleDto);
       expect(result.title).toBe('Test');
       expect(mockEvents.publish).toHaveBeenCalledWith(
         expect.objectContaining({ eventType: 'KNOWLEDGE_ARTICLE_CREATED' }),
@@ -153,13 +155,13 @@ describe('KnowledgeService', () => {
       const updated = { ...mockArticle, title: 'Updated' };
       mockPrisma.knowledgeArticle.update.mockResolvedValue(updated);
 
-      const result = await service.updateArticle(userId, articleId, { title: 'Updated' } as any);
+      const result = await service.updateArticle(userId, articleId, { title: 'Updated' } as UpdateArticleDto);
       expect(result.title).toBe('Updated');
     });
 
     it('throws NotFoundException when article not owned by user', async () => {
       mockPrisma.knowledgeArticle.findFirst.mockResolvedValue(null);
-      await expect(service.updateArticle(userId, articleId, {} as any)).rejects.toThrow(NotFoundException);
+      await expect(service.updateArticle(userId, articleId, {} as UpdateArticleDto)).rejects.toThrow(NotFoundException);
     });
   });
 

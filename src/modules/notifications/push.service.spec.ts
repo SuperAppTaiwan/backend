@@ -3,8 +3,8 @@ jest.mock('expo-server-sdk', () => {
     sendPushNotificationsAsync: jest.fn().mockResolvedValue([{ status: 'ok' }]),
     chunkPushNotifications: jest.fn().mockImplementation((msgs: unknown[]) => [msgs]),
   };
-  const MockExpoClass = jest.fn().mockImplementation(() => mockInstance);
-  (MockExpoClass as any).isExpoPushToken = jest.fn().mockReturnValue(true);
+  const MockExpoClass = jest.fn().mockImplementation(() => mockInstance) as jest.Mock & { isExpoPushToken: jest.Mock };
+  MockExpoClass.isExpoPushToken = jest.fn().mockReturnValue(true);
   return { __esModule: true, default: MockExpoClass };
 });
 

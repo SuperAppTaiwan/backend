@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import Expo, { ExpoPushMessage } from 'expo-server-sdk';
+import { PushPlatform } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 
 @Injectable()
@@ -10,10 +11,11 @@ export class PushService {
   constructor(private readonly prisma: PrismaService) {}
 
   async registerToken(userId: string, token: string, platform: string, deviceId: string) {
+    const pushPlatform = platform as PushPlatform;
     return this.prisma.pushToken.upsert({
       where: { userId_deviceId: { userId, deviceId } },
-      update: { token, platform: platform as any },
-      create: { userId, token, platform: platform as any, deviceId },
+      update: { token, platform: pushPlatform },
+      create: { userId, token, platform: pushPlatform, deviceId },
     });
   }
 
