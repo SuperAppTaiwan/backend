@@ -32,7 +32,7 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  ANTHROPIC_API_KEY: string = '';
+  GEMINI_API_KEY: string = '';
 }
 
 export function validateEnv(config: Record<string, unknown>) {

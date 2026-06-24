@@ -3,7 +3,7 @@ import { AISuggestionStatus, AISuggestionType, NotificationType, Prisma } from '
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { DeterministicAIProvider } from './providers/deterministic-ai.provider.js';
-import { ClaudeAIProvider } from './providers/claude-ai.provider.js';
+import { GeminiAIProvider } from './providers/gemini-ai.provider.js';
 import type { AIProvider, AIChatMessage } from './providers/ai-provider.interface.js';
 
 interface SuggestionInput {
@@ -23,11 +23,11 @@ export class AIService {
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
     private readonly deterministicProvider: DeterministicAIProvider,
-    private readonly claudeProvider: ClaudeAIProvider,
+    private readonly geminiProvider: GeminiAIProvider,
   ) {}
 
   private getProvider(): AIProvider {
-    return this.claudeProvider.isAvailable() ? this.claudeProvider : this.deterministicProvider;
+    return this.geminiProvider.isAvailable() ? this.geminiProvider : this.deterministicProvider;
   }
 
   // ─── AI Profile ──────────────────────────────────────────────────────────────

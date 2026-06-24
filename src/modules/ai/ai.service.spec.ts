@@ -4,7 +4,7 @@ import { AIService } from './ai.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 import { DeterministicAIProvider } from './providers/deterministic-ai.provider.js';
-import { ClaudeAIProvider } from './providers/claude-ai.provider.js';
+import { GeminiAIProvider } from './providers/gemini-ai.provider.js';
 import { ConfigService } from '@nestjs/config';
 
 const USER_ID = 'user-ai-test';
@@ -56,7 +56,7 @@ describe('AIService', () => {
         { provide: EventsService, useValue: { publish: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue(undefined) } },
         DeterministicAIProvider,
-        ClaudeAIProvider,
+        GeminiAIProvider,
       ],
     }).compile();
 
@@ -212,7 +212,7 @@ describe('AIService', () => {
 
   // ─── Chat ─────────────────────────────────────────────────────────────────────
 
-  it('chat falls back to deterministic when claude not available', async () => {
+  it('chat falls back to deterministic when gemini not available', async () => {
     (prisma.recommendationLog.create as jest.Mock).mockResolvedValue({});
     const result = await service.chat(USER_ID, [{ role: 'user', content: 'Tài chính của tôi thế nào?' }]);
     expect(result.provider).toBe('deterministic');

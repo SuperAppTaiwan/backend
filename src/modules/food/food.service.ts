@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ExpenseCategoryType, MealType, PaymentMethod, Prisma, ShoppingListStatus } from '@prisma/client';
+import { ExpenseCategoryType, PaymentMethod, Prisma, ShoppingListStatus } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { ConfigService } from '@nestjs/config';
@@ -32,56 +32,45 @@ import type {
 @Injectable()
 export class FoodService {
   private readonly logger = new Logger(FoodService.name);
-  private readonly anthropicKey: string | undefined;
-  private readonly anthropicModel: string;
+  private readonly geminiKey: string | undefined;
+  private readonly geminiModel: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
     private readonly config: ConfigService,
   ) {
-    this.anthropicKey = this.config.get<string>('ANTHROPIC_API_KEY') || undefined;
-    this.anthropicModel = this.config.get<string>('ANTHROPIC_MODEL') ?? 'claude-sonnet-4-6';
+    this.geminiKey = this.config.get<string>('GEMINI_API_KEY') || undefined;
+    this.geminiModel = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-1.5-flash';
   }
 
-  private async callClaude(prompt: string): Promise<string> {
-    if (!this.anthropicKey) return '';
+  private async callGemini(prompt: string): Promise<string> {
+    if (!this.geminiKey) return '';
     try {
-      const { default: Anthropic } = await import('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: this.anthropicKey });
-      const res = await client.messages.create({
-        model: this.anthropicModel,
-        max_tokens: 2048,
-        messages: [{ role: 'user', content: prompt }],
-      });
-      return res.content[0]?.type === 'text' ? res.content[0].text : '';
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genAI = new GoogleGenerativeAI(this.geminiKey);
+      const model = genAI.getGenerativeModel({ model: this.geminiModel });
+      const result = await model.generateContent(prompt);
+      return result.response.text();
     } catch (err) {
-      this.logger.warn('Claude call failed, falling back', err);
+      this.logger.warn('Gemini call failed, falling back', err);
       return '';
     }
   }
 
-  private async callClaudeVision(imageBase64: string, mimeType: string, prompt: string): Promise<string> {
-    if (!this.anthropicKey) return '';
+  private async callGeminiVision(imageBase64: string, mimeType: string, prompt: string): Promise<string> {
+    if (!this.geminiKey) return '';
     try {
-      const { default: Anthropic } = await import('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey: this.anthropicKey });
-      const res = await client.messages.create({
-        model: this.anthropicModel,
-        max_tokens: 2048,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', data: imageBase64 } },
-              { type: 'text', text: prompt },
-            ],
-          },
-        ],
-      });
-      return res.content[0]?.type === 'text' ? res.content[0].text : '';
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genAI = new GoogleGenerativeAI(this.geminiKey);
+      const model = genAI.getGenerativeModel({ model: this.geminiModel });
+      const imagePart = {
+        inlineData: { mimeType: mimeType as 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif', data: imageBase64 },
+      };
+      const result = await model.generateContent([imagePart, prompt]);
+      return result.response.text();
     } catch (err) {
-      this.logger.warn('Claude vision call failed', err);
+      this.logger.warn('Gemini vision call failed', err);
       return '';
     }
   }
@@ -563,7 +552,7 @@ Analyze this image and return:
 
 If the image is NOT food-related (e.g. a person, furniture, random object), set isFood to false and fill other fields with null/"OTHER".`;
 
-    let raw = await this.callClaudeVision(base64, mimeType, prompt);
+    const raw = await this.callGeminiVision(base64, mimeType, prompt);
 
     // Deterministic fallback when no API key
     if (!raw) {
@@ -664,7 +653,7 @@ Rules:
 - Keep instructions practical and specific
 - Prefer recipes using expiring ingredients`;
 
-    const raw = await this.callClaude(prompt);
+    const raw = await this.callGemini(prompt);
 
     if (!raw) {
       // Deterministic fallback
@@ -779,7 +768,7 @@ Rules:
 - Do not repeat meals already planned this week
 - Keep it practical for Vietnamese home cooking`;
 
-    const raw = await this.callClaude(prompt);
+    const raw = await this.callGemini(prompt);
 
     if (!raw) {
       return this.deterministicMealSuggestion(dto.mealType, ingredientList);
@@ -820,7 +809,6 @@ Rules:
 
   async nearbyStores(dto: NearbyStoresDto) {
     const radius = dto.radius ?? 3000;
-    const query = encodeURIComponent(`${dto.query} supermarket grocery store`);
 
     // Use Overpass API (OpenStreetMap) for free location search
     const overpassQuery = `
