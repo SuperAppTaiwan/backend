@@ -723,19 +723,26 @@ model NotificationPreference {
 // ─── Food ─────────────────────────────────────────────────────────────────────
 
 model Ingredient {
-  id          String        @id @default(cuid())
-  userId      String        @map("user_id")
-  name        String
-  category    FoodCategory  @default(OTHER)
-  unit        UnitOfMeasure @default(PIECE)
-  quantity    Decimal       @default(0) @db.Decimal(10, 3)
-  expiresAt   DateTime?     @map("expires_at")
-  purchasedAt DateTime?     @map("purchased_at")
-  cost        Decimal?      @db.Decimal(10, 2)
-  location    String?
-  notes       String?
-  createdAt   DateTime      @default(now()) @map("created_at")
-  updatedAt   DateTime      @updatedAt @map("updated_at")
+  id                    String        @id @default(cuid())
+  userId                String        @map("user_id")
+  name                  String
+  category              FoodCategory  @default(OTHER)
+  unit                  UnitOfMeasure @default(PIECE)
+  quantity              Decimal       @default(0) @db.Decimal(10, 3)
+  expiresAt             DateTime?     @map("expires_at")
+  purchasedAt           DateTime?     @map("purchased_at")
+  cost                  Decimal?      @db.Decimal(10, 2)
+  location              String?
+  notes                 String?
+  sourceType            String        @default("manual") @map("source_type")
+  imageUrl              String?       @map("image_url")
+  expirySource          String        @default("manual") @map("expiry_source")
+  freshnessStatus       String?       @map("freshness_status")
+  estimatedDaysRemaining Int?         @map("estimated_days_remaining")
+  aiConfidence          Decimal?      @map("ai_confidence") @db.Decimal(5, 2)
+  ocrRawText            String?       @map("ocr_raw_text")
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -743,20 +750,24 @@ model Ingredient {
 }
 
 model Recipe {
-  id              String        @id @default(cuid())
-  userId          String        @map("user_id")
-  title           String
-  description     String?
-  servings        Int           @default(1)
-  prepMinutes     Int           @default(0) @map("prep_minutes")
-  cookMinutes     Int           @default(0) @map("cook_minutes")
-  isPublic        Boolean       @default(false) @map("is_public")
-  category        FoodCategory  @default(OTHER)
-  ingredientsJson Json          @map("ingredients_json")
-  stepsJson       Json          @map("steps_json")
-  tagsJson        Json?         @map("tags_json")
-  createdAt       DateTime      @default(now()) @map("created_at")
-  updatedAt       DateTime      @updatedAt @map("updated_at")
+  id                  String        @id @default(cuid())
+  userId              String        @map("user_id")
+  title               String
+  description         String?
+  servings            Int           @default(1)
+  prepMinutes         Int           @default(0) @map("prep_minutes")
+  cookMinutes         Int           @default(0) @map("cook_minutes")
+  isPublic            Boolean       @default(false) @map("is_public")
+  isAiGenerated       Boolean       @default(false) @map("is_ai_generated")
+  category            FoodCategory  @default(OTHER)
+  ingredientsJson     Json          @map("ingredients_json")
+  stepsJson           Json          @map("steps_json")
+  tagsJson            Json?         @map("tags_json")
+  missingIngredients  Json?         @map("missing_ingredients")
+  nutritionJson       Json?         @map("nutrition_json")
+  aiReason            String?       @map("ai_reason")
+  createdAt           DateTime      @default(now()) @map("created_at")
+  updatedAt           DateTime      @updatedAt @map("updated_at")
 
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   mealPlans MealPlan[]
@@ -765,16 +776,19 @@ model Recipe {
 }
 
 model MealPlan {
-  id         String   @id @default(cuid())
-  userId     String   @map("user_id")
-  planDate   DateTime @map("plan_date")
-  mealType   MealType @map("meal_type")
-  recipeId   String?  @map("recipe_id")
-  customMeal String?  @map("custom_meal")
-  servings   Int      @default(1)
-  notes      String?
-  createdAt  DateTime @default(now()) @map("created_at")
-  updatedAt  DateTime @updatedAt @map("updated_at")
+  id               String   @id @default(cuid())
+  userId           String   @map("user_id")
+  planDate         DateTime @map("plan_date")
+  mealType         MealType @map("meal_type")
+  recipeId         String?  @map("recipe_id")
+  customMeal       String?  @map("custom_meal")
+  servings         Int      @default(1)
+  notes            String?
+  isAiGenerated    Boolean  @default(false) @map("is_ai_generated")
+  aiReason         String?  @map("ai_reason")
+  nutritionSummary String?  @map("nutrition_summary")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
 
   user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
   recipe Recipe? @relation(fields: [recipeId], references: [id], onDelete: SetNull)

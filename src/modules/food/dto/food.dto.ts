@@ -371,3 +371,84 @@ export class ToggleShoppingItemDto {
   @IsBoolean()
   declare isPurchased: boolean;
 }
+
+// ─── AI DTOs ─────────────────────────────────────────────────────────────────
+
+export class ScanIngredientDto {
+  @ApiProperty({ description: 'Base64 encoded image (no data URI prefix needed, but supported)' })
+  @IsString()
+  declare imageBase64: string;
+
+  @ApiPropertyOptional({ description: 'MIME type: image/jpeg or image/png' })
+  @IsOptional()
+  @IsString()
+  declare mimeType?: string;
+}
+
+export class GenerateRecipesDto {
+  @ApiPropertyOptional({ description: 'Max number of recipes to generate (default 3)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  declare count?: number;
+
+  @ApiPropertyOptional({ description: 'Prioritize ingredients expiring within N days (default 7)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  declare expiryPriorityDays?: number;
+}
+
+export class SuggestMealDto {
+  @ApiProperty({ example: '2026-06-25', description: 'Date for the meal slot' })
+  @IsDateString()
+  declare planDate: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+}
+
+export class NearbyStoresDto {
+  @ApiProperty({ description: 'Ingredient or item name to search for' })
+  @IsString()
+  declare query: string;
+
+  @ApiProperty({ description: 'Latitude of user location' })
+  @IsNumber()
+  declare lat: number;
+
+  @ApiProperty({ description: 'Longitude of user location' })
+  @IsNumber()
+  declare lng: number;
+
+  @ApiPropertyOptional({ description: 'Search radius in meters (default 3000)' })
+  @IsOptional()
+  @IsNumber()
+  @Min(100)
+  declare radius?: number;
+}
+
+export class AddShoppingItemDto {
+  @ApiProperty()
+  @IsString()
+  @MaxLength(200)
+  declare ingredientName: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  declare quantity?: number;
+
+  @ApiPropertyOptional({ enum: UnitOfMeasure })
+  @IsOptional()
+  @IsEnum(UnitOfMeasure)
+  declare unit?: UnitOfMeasure;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare notes?: string;
+}

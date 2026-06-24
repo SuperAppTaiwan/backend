@@ -1,7 +1,16 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ExpenseCategoryType, PaymentMethod, Prisma, ShoppingListStatus } from '@prisma/client';
+import { ExpenseCategoryType, MealType, PaymentMethod, Prisma, ShoppingListStatus } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
+import { ConfigService } from '@nestjs/config';
+
+interface OverpassElement {
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: Record<string, string>;
+}
 import type {
   CreateIngredientDto,
   UpdateIngredientDto,
@@ -13,16 +22,79 @@ import type {
   CreateShoppingListDto,
   UpdateShoppingListDto,
   GenerateShoppingListDto,
+  ScanIngredientDto,
+  GenerateRecipesDto,
+  SuggestMealDto,
+  NearbyStoresDto,
+  AddShoppingItemDto,
 } from './dto/food.dto.js';
 
 @Injectable()
 export class FoodService {
   private readonly logger = new Logger(FoodService.name);
+  private readonly anthropicKey: string | undefined;
+  private readonly anthropicModel: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
-  ) {}
+    private readonly config: ConfigService,
+  ) {
+    this.anthropicKey = this.config.get<string>('ANTHROPIC_API_KEY') || undefined;
+    this.anthropicModel = this.config.get<string>('ANTHROPIC_MODEL') ?? 'claude-sonnet-4-6';
+  }
+
+  private async callClaude(prompt: string): Promise<string> {
+    if (!this.anthropicKey) return '';
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey: this.anthropicKey });
+      const res = await client.messages.create({
+        model: this.anthropicModel,
+        max_tokens: 2048,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      return res.content[0]?.type === 'text' ? res.content[0].text : '';
+    } catch (err) {
+      this.logger.warn('Claude call failed, falling back', err);
+      return '';
+    }
+  }
+
+  private async callClaudeVision(imageBase64: string, mimeType: string, prompt: string): Promise<string> {
+    if (!this.anthropicKey) return '';
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey: this.anthropicKey });
+      const res = await client.messages.create({
+        model: this.anthropicModel,
+        max_tokens: 2048,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp', data: imageBase64 } },
+              { type: 'text', text: prompt },
+            ],
+          },
+        ],
+      });
+      return res.content[0]?.type === 'text' ? res.content[0].text : '';
+    } catch (err) {
+      this.logger.warn('Claude vision call failed', err);
+      return '';
+    }
+  }
+
+  private safeJson<T>(text: string, fallback: T): T {
+    try {
+      const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      if (match) return JSON.parse(match[0]) as T;
+      return JSON.parse(text) as T;
+    } catch {
+      return fallback;
+    }
+  }
 
   // ─── Ingredients ──────────────────────────────────────────────────────────
 
@@ -446,5 +518,374 @@ export class FoodService {
     });
     await this.events.publish({ userId, eventType: EventType.SHOPPING_LIST_COMPLETED, sourceModule: 'food', payload: { id } });
     return updated;
+  }
+
+  async addShoppingItem(userId: string, listId: string, dto: AddShoppingItemDto) {
+    await this.getShoppingList(userId, listId);
+    const item = await this.prisma.shoppingListItem.create({
+      data: {
+        shoppingListId: listId,
+        ingredientName: dto.ingredientName,
+        quantity: new Prisma.Decimal(dto.quantity ?? 1),
+        unit: (dto.unit as Parameters<typeof this.prisma.shoppingListItem.create>[0]['data']['unit']) ?? 'PIECE',
+        notes: dto.notes,
+      },
+    });
+    await this.events.publish({ userId, eventType: EventType.SHOPPING_LIST_UPDATED, sourceModule: 'food', payload: { id: listId } });
+    return item;
+  }
+
+  // ─── AI: Ingredient Camera Scan ───────────────────────────────────────────
+
+  async scanIngredient(userId: string, dto: ScanIngredientDto) {
+    const mimeType = dto.mimeType ?? 'image/jpeg';
+    // Strip data URI prefix if present
+    const base64 = dto.imageBase64.replace(/^data:image\/\w+;base64,/, '');
+
+    const prompt = `You are analyzing a food/ingredient image. Respond with a JSON object only (no markdown, no explanation).
+
+Analyze this image and return:
+{
+  "isFood": boolean,           // true if this contains food, ingredient, grocery item, packaged food
+  "name": string,              // detected ingredient/food name in English (e.g. "Carrot", "Chicken breast", "Milk")
+  "nameVi": string,            // Vietnamese name
+  "category": string,          // one of: VEGETABLE, FRUIT, MEAT, SEAFOOD, DAIRY, GRAIN, LEGUME, CONDIMENT, BEVERAGE, SNACK, FROZEN, OTHER
+  "quantity": number | null,   // detected quantity if visible, else null
+  "unit": string,              // one of: GRAM, KG, ML, LITER, PIECE, PACK, CAN, BOTTLE, BOX, TABLESPOON, TEASPOON, CUP, OTHER
+  "ocrExpiryText": string | null,  // raw OCR text for expiry date if found on packaging
+  "expiryDate": string | null,     // normalized ISO date YYYY-MM-DD if expiry found via OCR
+  "expirySource": string,          // "ocr" if OCR found date, "ai_estimated" if AI estimated, "manual" if not determinable
+  "freshnessStatus": string | null, // "fresh", "good", "aging", "near_expiry", "expired" if no OCR date
+  "estimatedDaysRemaining": number | null, // AI estimate of days remaining if no OCR date
+  "aiConfidence": number,       // 0-100 confidence in the food identification
+  "reason": string             // brief reason/description
+}
+
+If the image is NOT food-related (e.g. a person, furniture, random object), set isFood to false and fill other fields with null/"OTHER".`;
+
+    let raw = await this.callClaudeVision(base64, mimeType, prompt);
+
+    // Deterministic fallback when no API key
+    if (!raw) {
+      return {
+        isFood: false,
+        name: '',
+        nameVi: '',
+        category: 'OTHER',
+        quantity: null,
+        unit: 'PIECE',
+        ocrExpiryText: null,
+        expiryDate: null,
+        expirySource: 'manual',
+        freshnessStatus: null,
+        estimatedDaysRemaining: null,
+        aiConfidence: 0,
+        reason: 'AI không khả dụng. Vui lòng nhập thủ công.',
+        fallback: true,
+      };
+    }
+
+    const result = this.safeJson<Record<string, unknown>>(raw, { isFood: false, aiConfidence: 0, reason: 'Không thể phân tích ảnh' });
+    return result;
+  }
+
+  // ─── AI: Recipe Generation ────────────────────────────────────────────────
+
+  async generateRecipes(userId: string, dto: GenerateRecipesDto) {
+    const expiryDays = dto.expiryPriorityDays ?? 7;
+    const count = Math.min(dto.count ?? 3, 5);
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() + expiryDays);
+
+    const [allIngredients, expiringIngredients] = await Promise.all([
+      this.prisma.ingredient.findMany({
+        where: { userId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], quantity: { gt: 0 } },
+        orderBy: [{ expiresAt: 'asc' }],
+        take: 30,
+      }),
+      this.prisma.ingredient.findMany({
+        where: { userId, expiresAt: { not: null, lte: cutoff }, quantity: { gt: 0 } },
+        orderBy: { expiresAt: 'asc' },
+      }),
+    ]);
+
+    const ingredientList = allIngredients.map((i) => ({
+      name: i.name,
+      category: i.category,
+      quantity: parseFloat(i.quantity.toString()),
+      unit: i.unit,
+      expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null,
+      isExpiringSoon: expiringIngredients.some((e) => e.id === i.id),
+    }));
+
+    if (ingredientList.length === 0) {
+      return [];
+    }
+
+    const prompt = `You are a Vietnamese home cooking AI assistant. Generate ${count} practical recipe suggestions based on these available ingredients.
+
+Available ingredients:
+${JSON.stringify(ingredientList, null, 2)}
+
+PRIORITY: Use ingredients marked as isExpiringSoon=true first to minimize food waste.
+
+Return a JSON array of ${count} recipes:
+[
+  {
+    "title": string,           // Vietnamese dish name (also add English in parentheses)
+    "description": string,     // 1-2 sentence description in Vietnamese
+    "category": string,        // VEGETABLE, MEAT, SEAFOOD, DAIRY, GRAIN, OTHER
+    "servings": number,
+    "prepMinutes": number,
+    "cookMinutes": number,
+    "ingredientsJson": [       // ingredients to use
+      { "name": string, "quantity": number, "unit": string }
+    ],
+    "missingIngredients": [string],  // ingredient names NOT in the available list but needed
+    "stepsJson": [
+      { "step": number, "description": string }  // Vietnamese instructions
+    ],
+    "nutritionJson": {
+      "calories": number,      // per serving estimate
+      "protein": string,
+      "carbs": string,
+      "fat": string
+    },
+    "aiReason": string,        // why this recipe is a good fit (Vietnamese)
+    "tagsJson": [string]
+  }
+]
+
+Rules:
+- Only suggest recipes that make sense with available ingredients
+- Mark missing ingredients honestly in missingIngredients array
+- Use Vietnamese for descriptions and instructions
+- Keep instructions practical and specific
+- Prefer recipes using expiring ingredients`;
+
+    const raw = await this.callClaude(prompt);
+
+    if (!raw) {
+      // Deterministic fallback
+      return this.deterministicRecipeSuggestions(ingredientList);
+    }
+
+    const recipes = this.safeJson<Record<string, unknown>[]>(raw, []);
+    if (!Array.isArray(recipes) || recipes.length === 0) {
+      return this.deterministicRecipeSuggestions(ingredientList);
+    }
+
+    return recipes.map((r) => ({
+      ...r,
+      isAiGenerated: true,
+      matchRate: this.calcMatchRate(r.ingredientsJson as { name: string }[], ingredientList.map((i) => i.name)),
+    }));
+  }
+
+  private deterministicRecipeSuggestions(ingredients: { name: string; category: string }[]) {
+    const hasVeggies = ingredients.some((i) => i.category === 'VEGETABLE');
+    const hasMeat = ingredients.some((i) => i.category === 'MEAT' || i.category === 'SEAFOOD');
+    const suggestions = [];
+
+    if (hasVeggies || hasMeat) {
+      suggestions.push({
+        title: 'Cơm chiên rau củ (Fried Rice with Vegetables)',
+        description: 'Món cơm chiên đơn giản với rau củ có sẵn, dễ làm và bổ dưỡng.',
+        category: 'OTHER',
+        servings: 2,
+        prepMinutes: 10,
+        cookMinutes: 15,
+        ingredientsJson: ingredients.slice(0, 3).map((i) => ({ name: i.name, quantity: 1, unit: 'PIECE' })),
+        missingIngredients: ['cơm nguội', 'trứng', 'nước mắm'],
+        stepsJson: [
+          { step: 1, description: 'Chuẩn bị và thái nhỏ các loại rau củ.' },
+          { step: 2, description: 'Phi hành tỏi cho thơm rồi cho rau vào xào.' },
+          { step: 3, description: 'Cho cơm vào đảo đều, nêm nước mắm vừa ăn.' },
+        ],
+        nutritionJson: { calories: 350, protein: '12g', carbs: '55g', fat: '8g' },
+        aiReason: 'Sử dụng nguyên liệu có sẵn, đơn giản và nhanh chóng.',
+        tagsJson: ['quick', 'easy'],
+        isAiGenerated: false,
+        matchRate: 60,
+      });
+    }
+
+    return suggestions;
+  }
+
+  private calcMatchRate(recipeIngredients: { name: string }[] | unknown, owned: string[]): number {
+    if (!Array.isArray(recipeIngredients) || recipeIngredients.length === 0) return 0;
+    const ownedLower = new Set(owned.map((n) => n.toLowerCase().trim()));
+    const matched = recipeIngredients.filter((i) => ownedLower.has((i.name ?? '').toLowerCase().trim())).length;
+    return Math.round((matched / recipeIngredients.length) * 100);
+  }
+
+  // ─── AI: Meal Slot Suggestion ─────────────────────────────────────────────
+
+  async suggestMeal(userId: string, dto: SuggestMealDto) {
+    const planDateObj = new Date(dto.planDate);
+    const weekStart = new Date(planDateObj);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+
+    const [ingredients, existingMeals] = await Promise.all([
+      this.prisma.ingredient.findMany({
+        where: { userId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], quantity: { gt: 0 } },
+        orderBy: [{ expiresAt: 'asc' }],
+        take: 20,
+      }),
+      this.prisma.mealPlan.findMany({
+        where: { userId, planDate: { gte: weekStart, lt: weekEnd } },
+        include: { recipe: { select: { title: true } } },
+        orderBy: { planDate: 'asc' },
+      }),
+    ]);
+
+    const ingredientList = ingredients.map((i) => ({ name: i.name, category: i.category, expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null }));
+    const existingMealNames = existingMeals.map((m) => m.recipe?.title ?? m.customMeal ?? '').filter(Boolean);
+
+    const mealTypeVi: Record<string, string> = { BREAKFAST: 'bữa sáng', LUNCH: 'bữa trưa', DINNER: 'bữa tối', SNACK: 'bữa ăn vặt' };
+
+    const prompt = `You are a Vietnamese meal planning AI. Suggest ONE ${mealTypeVi[dto.mealType] ?? dto.mealType} meal for ${dto.planDate}.
+
+Available ingredients:
+${JSON.stringify(ingredientList)}
+
+Meals already planned this week (avoid repetition):
+${existingMealNames.join(', ') || 'none'}
+
+Return a single JSON object:
+{
+  "mealName": string,           // Vietnamese dish name
+  "description": string,        // 1-2 sentences in Vietnamese
+  "category": string,           // VEGETABLE, MEAT, SEAFOOD, DAIRY, GRAIN, OTHER
+  "servings": number,
+  "prepMinutes": number,
+  "cookMinutes": number,
+  "ingredientsFromInventory": [string],  // ingredient names from the available list
+  "missingIngredients": [string],        // what needs to be bought
+  "stepsJson": [{ "step": number, "description": string }],
+  "nutritionSummary": string,    // e.g. "~450 kcal, 25g đạm"
+  "aiReason": string,            // why this meal is suitable (Vietnamese)
+  "estimatedCalories": number
+}
+
+Rules:
+- Must be appropriate for ${dto.mealType} (breakfast = lighter, dinner = heartier)
+- Use expiring ingredients when possible
+- Do not repeat meals already planned this week
+- Keep it practical for Vietnamese home cooking`;
+
+    const raw = await this.callClaude(prompt);
+
+    if (!raw) {
+      return this.deterministicMealSuggestion(dto.mealType, ingredientList);
+    }
+
+    const suggestion = this.safeJson<Record<string, unknown>>(raw, {});
+    if (!suggestion.mealName) {
+      return this.deterministicMealSuggestion(dto.mealType, ingredientList);
+    }
+
+    return { ...suggestion, isAiGenerated: true, planDate: dto.planDate, mealType: dto.mealType };
+  }
+
+  private deterministicMealSuggestion(mealType: string, ingredients: { name: string }[]) {
+    const meals: Record<string, Record<string, unknown>> = {
+      BREAKFAST: { mealName: 'Cháo trắng với trứng', description: 'Bữa sáng đơn giản, dễ làm và bổ dưỡng.', estimatedCalories: 250 },
+      LUNCH: { mealName: 'Cơm trắng với rau xào', description: 'Bữa trưa cân bằng dinh dưỡng.', estimatedCalories: 450 },
+      DINNER: { mealName: 'Canh rau với thịt', description: 'Bữa tối nhẹ nhàng và bổ dưỡng.', estimatedCalories: 400 },
+      SNACK: { mealName: 'Trái cây tươi', description: 'Ăn nhẹ tốt cho sức khỏe.', estimatedCalories: 150 },
+    };
+    return {
+      ...(meals[mealType] ?? meals['LUNCH']),
+      category: 'OTHER',
+      servings: 1,
+      prepMinutes: 10,
+      cookMinutes: 15,
+      ingredientsFromInventory: ingredients.slice(0, 2).map((i) => i.name),
+      missingIngredients: [],
+      stepsJson: [{ step: 1, description: 'Chuẩn bị và nấu theo khẩu vị.' }],
+      nutritionSummary: `~${(meals[mealType] as Record<string, number>)?.estimatedCalories ?? 400} kcal`,
+      aiReason: 'Gợi ý mặc định khi AI không khả dụng.',
+      isAiGenerated: false,
+      mealType,
+    };
+  }
+
+  // ─── Nearby Grocery Stores ────────────────────────────────────────────────
+
+  async nearbyStores(dto: NearbyStoresDto) {
+    const radius = dto.radius ?? 3000;
+    const query = encodeURIComponent(`${dto.query} supermarket grocery store`);
+
+    // Use Overpass API (OpenStreetMap) for free location search
+    const overpassQuery = `
+[out:json][timeout:10];
+(
+  node["shop"~"supermarket|convenience|grocery|greengrocer|bakery|butcher|deli|seafood|health_food"](around:${radius},${dto.lat},${dto.lng});
+  way["shop"~"supermarket|convenience|grocery|greengrocer|bakery|butcher|deli|seafood|health_food"](around:${radius},${dto.lat},${dto.lng});
+);
+out center 15;`;
+
+    try {
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `data=${encodeURIComponent(overpassQuery)}`,
+        signal: AbortSignal.timeout(12000),
+      });
+
+      if (!res.ok) throw new Error(`Overpass API error: ${res.status}`);
+
+      const data = await res.json() as { elements: OverpassElement[] };
+      const elements: OverpassElement[] = data.elements ?? [];
+
+      const stores = elements
+        .filter((el) => el.tags?.name)
+        .map((el) => {
+          const lat = el.lat ?? el.center?.lat ?? 0;
+          const lng = el.lon ?? el.center?.lon ?? 0;
+          const dist = this.haversineDistance(dto.lat, dto.lng, lat, lng);
+          return {
+            id: el.id,
+            name: el.tags?.name ?? 'Cửa hàng',
+            type: el.tags?.shop ?? 'store',
+            lat,
+            lng,
+            distanceMeters: Math.round(dist),
+            distanceLabel: dist < 1000 ? `${Math.round(dist)}m` : `${(dist / 1000).toFixed(1)}km`,
+            address: [el.tags?.['addr:street'], el.tags?.['addr:city']].filter(Boolean).join(', ') || null,
+            openingHours: el.tags?.opening_hours ?? null,
+            phone: el.tags?.phone ?? null,
+            mapsUrl: `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`,
+          };
+        })
+        .sort((a, b) => a.distanceMeters - b.distanceMeters)
+        .slice(0, 15);
+
+      return {
+        query: dto.query,
+        lat: dto.lat,
+        lng: dto.lng,
+        radius,
+        count: stores.length,
+        stores,
+      };
+    } catch (err) {
+      this.logger.warn('Overpass API failed', err);
+      return { query: dto.query, lat: dto.lat, lng: dto.lng, radius, count: 0, stores: [], error: 'Không thể tìm cửa hàng gần đây' };
+    }
+  }
+
+  private haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const R = 6371000;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 }

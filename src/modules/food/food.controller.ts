@@ -26,6 +26,11 @@ import {
   UpdateShoppingListDto,
   GenerateShoppingListDto,
   ToggleShoppingItemDto,
+  ScanIngredientDto,
+  GenerateRecipesDto,
+  SuggestMealDto,
+  NearbyStoresDto,
+  AddShoppingItemDto,
 } from './dto/food.dto.js';
 
 @ApiTags('Food')
@@ -226,5 +231,58 @@ export class FoodController {
   @ApiResponse({ status: 200, description: 'Shopping list completed' })
   completeShoppingList(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.foodService.completeShoppingList(user.userId, id);
+  }
+
+  @Post('shopping-lists/:id/items')
+  @ApiOperation({ summary: 'Add a single item to a shopping list' })
+  @ApiResponse({ status: 201, description: 'Item added' })
+  addShoppingItem(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: AddShoppingItemDto) {
+    return this.foodService.addShoppingItem(user.userId, id, dto);
+  }
+
+  // ─── AI Endpoints ─────────────────────────────────────────────────────────
+
+  @Post('ingredients/scan')
+  @ApiOperation({ summary: 'AI: Scan ingredient from camera image (base64)' })
+  @ApiResponse({ status: 200, description: 'AI analysis result with detected ingredient info' })
+  scanIngredient(@CurrentUser() user: AuthUser, @Body() dto: ScanIngredientDto) {
+    return this.foodService.scanIngredient(user.userId, dto);
+  }
+
+  @Post('recipes/generate')
+  @ApiOperation({ summary: 'AI: Generate recipe suggestions from current ingredient inventory' })
+  @ApiResponse({ status: 200, description: 'AI-generated recipe suggestions' })
+  generateRecipes(@CurrentUser() user: AuthUser, @Body() dto: GenerateRecipesDto) {
+    return this.foodService.generateRecipes(user.userId, dto);
+  }
+
+  @Post('meal-plans/suggest')
+  @ApiOperation({ summary: 'AI: Suggest a meal for a given date and meal type slot' })
+  @ApiResponse({ status: 200, description: 'AI-generated meal suggestion' })
+  suggestMeal(@CurrentUser() user: AuthUser, @Body() dto: SuggestMealDto) {
+    return this.foodService.suggestMeal(user.userId, dto);
+  }
+
+  @Get('shopping/nearby')
+  @ApiOperation({ summary: 'Find nearby grocery stores for an ingredient search query' })
+  @ApiQuery({ name: 'query', required: true, type: String })
+  @ApiQuery({ name: 'lat', required: true, type: Number })
+  @ApiQuery({ name: 'lng', required: true, type: Number })
+  @ApiQuery({ name: 'radius', required: false, type: Number, description: 'Radius in meters (default 3000)' })
+  @ApiResponse({ status: 200, description: 'Nearby grocery stores' })
+  nearbyStores(
+    @CurrentUser() _user: AuthUser,
+    @Query('query') query: string,
+    @Query('lat') lat: string,
+    @Query('lng') lng: string,
+    @Query('radius') radius?: string,
+  ) {
+    const dto: NearbyStoresDto = {
+      query,
+      lat: parseFloat(lat),
+      lng: parseFloat(lng),
+      radius: radius ? parseInt(radius, 10) : undefined,
+    };
+    return this.foodService.nearbyStores(dto);
   }
 }
