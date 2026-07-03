@@ -4,7 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { FoodService } from './food.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
-import { FoodCategory, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
+import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
+import { FoodCategory, MealType, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 
 const USER_ID = 'user-food-test';
 
@@ -80,54 +81,30 @@ describe('FoodService', () => {
   let service: FoodService;
   let prisma: MockedPrisma;
   let eventsService: { publish: jest.Mock };
+  let aiChain: { generateText: jest.Mock };
 
   beforeEach(async () => {
     const mockPrisma = {
-      ingredient: {
-        findMany: jest.fn(),
-        findFirst: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        delete: jest.fn(),
-      },
-      recipe: {
-        findMany: jest.fn(),
-        findFirst: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        delete: jest.fn(),
-      },
-      mealPlan: {
-        findMany: jest.fn(),
-        findFirst: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        delete: jest.fn(),
-      },
-      shoppingList: {
-        findMany: jest.fn(),
-        findFirst: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        delete: jest.fn(),
-      },
-      shoppingListItem: {
-        findFirst: jest.fn(),
-        createMany: jest.fn(),
-        update: jest.fn(),
-        count: jest.fn(),
-      },
+      ingredient: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+      recipe: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+      mealPlan: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+      shoppingList: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn(), delete: jest.fn() },
+      shoppingListItem: { findFirst: jest.fn(), createMany: jest.fn(), update: jest.fn(), count: jest.fn() },
       expenseCategory: { findFirst: jest.fn() },
       expense: { create: jest.fn() },
+      fixedEvent: { findMany: jest.fn().mockResolvedValue([]) },
+      task: { findMany: jest.fn().mockResolvedValue([]) },
     };
 
     const mockEvents = { publish: jest.fn().mockResolvedValue(undefined) };
+    const mockAIChain = { generateText: jest.fn().mockResolvedValue('') };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         FoodService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: EventsService, useValue: mockEvents },
+        { provide: AIProviderChain, useValue: mockAIChain },
         { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue(undefined) } },
       ],
     }).compile();
@@ -135,6 +112,7 @@ describe('FoodService', () => {
     service = module.get<FoodService>(FoodService);
     prisma = module.get(PrismaService);
     eventsService = module.get(EventsService);
+    aiChain = module.get(AIProviderChain) as unknown as { generateText: jest.Mock };
   });
 
   // ─── Ingredient ────────────────────────────────────────────────────────────
@@ -280,6 +258,292 @@ describe('FoodService', () => {
       const result = await service.createShoppingList(USER_ID, { name: 'Mua sắm cuối tuần' });
       expect(result).toEqual(list);
       expect(eventsService.publish).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'SHOPPING_LIST_CREATED' }));
+    });
+  });
+
+  // ─── nearbyStores ──────────────────────────────────────────────────────────
+
+  describe('nearbyStores', () => {
+    const USER_LAT = 25.033;
+    const USER_LNG = 121.564;
+
+    beforeEach(() => {
+      global.fetch = jest.fn();
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('returns error immediately when lat/lng are NaN', async () => {
+      const result = await service.nearbyStores({ query: 'milk', lat: NaN, lng: NaN });
+      expect(result.count).toBe(0);
+      expect(result.error).toBeDefined();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('returns stores sorted by distance when Overpass succeeds', async () => {
+      const elements = [
+        { id: 1, lat: 25.040, lon: 121.564, tags: { name: 'Far Market', shop: 'supermarket' } },
+        { id: 2, lat: 25.034, lon: 121.564, tags: { name: 'Close PX Mart', shop: 'supermarket' } },
+      ];
+      (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => ({ elements }) });
+
+      const result = await service.nearbyStores({ query: 'milk', lat: USER_LAT, lng: USER_LNG, radius: 3000 });
+      expect(result.count).toBeGreaterThan(0);
+      expect(result.provider).toBe('overpass');
+      expect(result.stores[0].distanceMeters).toBeLessThanOrEqual(result.stores[result.stores.length - 1].distanceMeters);
+    });
+
+    it('tries second Overpass mirror when first fails', async () => {
+      (global.fetch as jest.Mock)
+        .mockRejectedValueOnce(new Error('Connection refused'))
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ elements: [{ id: 3, lat: 25.033, lon: 121.565, tags: { name: 'Nearby Store', shop: 'grocery' } }] }),
+        });
+
+      const result = await service.nearbyStores({ query: 'carrot', lat: USER_LAT, lng: USER_LNG });
+      expect(result.count).toBe(1);
+      expect(result.stores[0].name).toBe('Nearby Store');
+    });
+
+    it('returns empty stores with error message when all Overpass mirrors fail', async () => {
+      (global.fetch as jest.Mock).mockRejectedValue(new Error('Network unreachable'));
+
+      const result = await service.nearbyStores({ query: 'milk', lat: USER_LAT, lng: USER_LNG });
+      expect(result.count).toBe(0);
+      expect(result.stores).toHaveLength(0);
+      expect(result.error).toMatch(/tạm thời/);
+    });
+
+    it('excludes unnamed elements from results', async () => {
+      const elements = [
+        { id: 1, lat: USER_LAT, lon: USER_LNG, tags: { shop: 'supermarket' } }, // no name
+        { id: 2, lat: USER_LAT, lon: USER_LNG + 0.001, tags: { name: 'Named Store', shop: 'grocery' } },
+      ];
+      (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => ({ elements }) });
+
+      const result = await service.nearbyStores({ query: 'eggs', lat: USER_LAT, lng: USER_LNG });
+      expect(result.count).toBe(1);
+      expect(result.stores[0].name).toBe('Named Store');
+    });
+
+    it('returns osmUrl and mapsUrl for each store', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ elements: [{ id: 5, lat: 25.034, lon: 121.566, tags: { name: '全聯', shop: 'supermarket' } }] }),
+      });
+
+      const result = await service.nearbyStores({ query: 'vegetable', lat: USER_LAT, lng: USER_LNG });
+      expect(result.stores[0].mapsUrl).toContain('google.com/maps');
+      expect(result.stores[0].osmUrl).toContain('openstreetmap.org');
+    });
+
+    it('haversine: calculates ~111m per 0.001° latitude at equatorial scale', () => {
+      const dist = service.haversineDistance(25.000, 121.000, 25.001, 121.000);
+      expect(dist).toBeGreaterThan(100);
+      expect(dist).toBeLessThan(120);
+    });
+
+    it('limits results to 15 stores maximum', async () => {
+      const elements = Array.from({ length: 25 }, (_, i) => ({
+        id: i + 1,
+        lat: USER_LAT + i * 0.001,
+        lon: USER_LNG,
+        tags: { name: `Store ${i + 1}`, shop: 'convenience' },
+      }));
+      (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => ({ elements }) });
+
+      const result = await service.nearbyStores({ query: 'milk', lat: USER_LAT, lng: USER_LNG });
+      expect(result.stores.length).toBeLessThanOrEqual(15);
+    });
+  });
+
+  // ─── suggestMeal ──────────────────────────────────────────────────────────
+
+  describe('suggestMeal', () => {
+    const PLAN_DATE = '2026-07-01';
+
+    const makeAiSuggestion = (overrides: Record<string, unknown> = {}) => ({
+      mealName: 'Phở bò',
+      description: 'Phở truyền thống với nước dùng đậm đà.',
+      category: 'MEAT',
+      servings: 2,
+      prepMinutes: 10,
+      cookMinutes: 30,
+      ingredientsJson: [{ name: 'Thịt bò', quantity: 200, unit: 'GRAM' }],
+      ingredientsFromInventory: ['Thịt bò'],
+      missingIngredients: ['Bánh phở'],
+      stepsJson: [{ step: 1, description: 'Nấu nước dùng.' }],
+      nutritionSummary: '~450 kcal, 25g đạm',
+      nutritionJson: { calories: 450, protein: '25g', carbs: '40g', fat: '12g', fiber: '2g' },
+      aiReason: 'Phù hợp bữa sáng.',
+      estimatedCalories: 450,
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      prisma.ingredient.findMany.mockResolvedValue([makeIngredient()] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+      prisma.fixedEvent.findMany.mockResolvedValue([]);
+      prisma.task.findMany.mockResolvedValue([]);
+    });
+
+    it('returns AI suggestion when AI responds with valid JSON', async () => {
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion()));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.BREAKFAST });
+
+      expect((result as Record<string, unknown>).mealName).toBe('Phở bò');
+      expect(result.isAiGenerated).toBe(true);
+      expect(result.isBusySlot).toBe(false);
+    });
+
+    it('returns ingredientsJson in the AI suggestion', async () => {
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion()));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.BREAKFAST });
+
+      expect(Array.isArray((result as Record<string, unknown>).ingredientsJson)).toBe(true);
+    });
+
+    it('falls back to deterministic suggestion when AI returns empty', async () => {
+      aiChain.generateText.mockResolvedValue('');
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.BREAKFAST });
+
+      expect((result as Record<string, unknown>).mealName).toBeDefined();
+      expect(result.isAiGenerated).toBe(false);
+    });
+
+    it('marks isBusySlot true when user has more than 4 hours of scheduled events', async () => {
+      prisma.fixedEvent.findMany.mockResolvedValue([
+        { startTime: new Date('2026-07-01T01:00:00Z'), endTime: new Date('2026-07-01T07:00:00Z') }, // 6 hours
+      ] as never);
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion({ mealName: 'Bánh mì' })));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.LUNCH });
+
+      expect(result.isBusySlot).toBe(true);
+    });
+
+    it('does not mark isBusySlot when user has little schedule', async () => {
+      prisma.fixedEvent.findMany.mockResolvedValue([
+        { startTime: new Date('2026-07-01T01:00:00Z'), endTime: new Date('2026-07-01T02:00:00Z') }, // 1 hour
+      ] as never);
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion()));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.BREAKFAST });
+
+      expect(result.isBusySlot).toBe(false);
+    });
+
+    it('rejects AI suggestion that is in the excludeMeals list and uses deterministic fallback', async () => {
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion({ mealName: 'Cháo trắng với trứng' })));
+
+      const result = await service.suggestMeal(USER_ID, {
+        planDate: PLAN_DATE,
+        mealType: MealType.BREAKFAST,
+        excludeMeals: ['Cháo trắng với trứng'],
+      });
+
+      expect((result as Record<string, unknown>).mealName).not.toBe('Cháo trắng với trứng');
+      expect(result.isAiGenerated).toBe(false);
+    });
+
+    it('includes busy-day prompt guidance when user is busy (verifies context is built)', async () => {
+      prisma.fixedEvent.findMany.mockResolvedValue([
+        { startTime: new Date('2026-07-01T01:00:00Z'), endTime: new Date('2026-07-01T08:00:00Z') },
+      ] as never);
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion({ prepMinutes: 5, cookMinutes: 10 })));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.LUNCH });
+
+      expect(result.isBusySlot).toBe(true);
+      expect((result as Record<string, unknown>).prepMinutes).toBeDefined();
+    });
+  });
+
+  // ─── acceptMealSuggestion ─────────────────────────────────────────────────
+
+  describe('acceptMealSuggestion', () => {
+    it('creates a Recipe and MealPlan atomically and publishes MEAL_PLAN_CREATED', async () => {
+      const mockRecipe = makeRecipe({ id: 'recipe-ai-1', title: 'Phở bò' });
+      const mockPlan = {
+        id: 'plan-ai-1',
+        userId: USER_ID,
+        planDate: new Date('2026-07-01'),
+        mealType: MealType.BREAKFAST,
+        recipeId: 'recipe-ai-1',
+        servings: 2,
+        isAiGenerated: true,
+        aiReason: 'AI suggestion',
+        nutritionSummary: '~450 kcal',
+        notes: null,
+        customMeal: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        recipe: { id: 'recipe-ai-1', title: 'Phở bò', prepMinutes: 10, cookMinutes: 30, servings: 2 },
+      };
+
+      prisma.recipe.create.mockResolvedValue(mockRecipe as never);
+      prisma.mealPlan.create.mockResolvedValue(mockPlan as never);
+
+      const result = await service.acceptMealSuggestion(USER_ID, {
+        planDate: '2026-07-01',
+        mealType: MealType.BREAKFAST,
+        mealName: 'Phở bò',
+        prepMinutes: 10,
+        cookMinutes: 30,
+        servings: 2,
+        aiReason: 'AI suggestion',
+        nutritionSummary: '~450 kcal',
+        ingredientsJson: [{ name: 'Thịt bò', quantity: 200, unit: UnitOfMeasure.GRAM }],
+        stepsJson: [{ step: 1, description: 'Nấu nước dùng.' }],
+      });
+
+      expect(prisma.recipe.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ title: 'Phở bò', isAiGenerated: true }),
+        }),
+      );
+      expect(prisma.mealPlan.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ recipeId: mockRecipe.id }),
+        }),
+      );
+      expect(result.id).toBe('plan-ai-1');
+      expect(eventsService.publish).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: 'MEAL_PLAN_CREATED', userId: USER_ID }),
+      );
+    });
+
+    it('stores recipe with the full ingredientsJson and stepsJson passed from the suggestion', async () => {
+      const ingredientsJson = [{ name: 'Gà', quantity: 300, unit: UnitOfMeasure.GRAM }];
+      const stepsJson = [{ step: 1, description: 'Ướp gà' }, { step: 2, description: 'Chiên vàng' }];
+      const mockRecipe = makeRecipe({ id: 'recipe-ai-2', title: 'Gà chiên giòn' });
+      prisma.recipe.create.mockResolvedValue(mockRecipe as never);
+      prisma.mealPlan.create.mockResolvedValue({
+        id: 'plan-ai-2', userId: USER_ID, planDate: new Date(), mealType: MealType.LUNCH,
+        recipeId: 'recipe-ai-2', recipe: mockRecipe, servings: 1, isAiGenerated: true,
+        aiReason: null, nutritionSummary: null, notes: null, customMeal: null,
+        createdAt: new Date(), updatedAt: new Date(),
+      } as never);
+
+      await service.acceptMealSuggestion(USER_ID, {
+        planDate: '2026-07-02',
+        mealType: MealType.LUNCH,
+        mealName: 'Gà chiên giòn',
+        ingredientsJson,
+        stepsJson,
+      });
+
+      expect(prisma.recipe.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ ingredientsJson, stepsJson }),
+        }),
+      );
     });
   });
 });

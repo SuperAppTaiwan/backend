@@ -29,6 +29,7 @@ import {
   ScanIngredientDto,
   GenerateRecipesDto,
   SuggestMealDto,
+  AcceptMealSuggestionDto,
   NearbyStoresDto,
   AddShoppingItemDto,
 } from './dto/food.dto.js';
@@ -258,9 +259,16 @@ export class FoodController {
 
   @Post('meal-plans/suggest')
   @ApiOperation({ summary: 'AI: Suggest a meal for a given date and meal type slot' })
-  @ApiResponse({ status: 200, description: 'AI-generated meal suggestion' })
+  @ApiResponse({ status: 200, description: 'AI-generated meal suggestion with nutrition balance, schedule awareness, and meal-type constraints' })
   suggestMeal(@CurrentUser() user: AuthUser, @Body() dto: SuggestMealDto) {
     return this.foodService.suggestMeal(user.userId, dto);
+  }
+
+  @Post('meal-plans/accept-suggestion')
+  @ApiOperation({ summary: 'Accept an AI meal suggestion — creates Recipe + MealPlan atomically' })
+  @ApiResponse({ status: 201, description: 'MealPlan created with linked Recipe containing full ingredients and steps' })
+  acceptMealSuggestion(@CurrentUser() user: AuthUser, @Body() dto: AcceptMealSuggestionDto) {
+    return this.foodService.acceptMealSuggestion(user.userId, dto);
   }
 
   @Get('shopping/nearby')
@@ -269,6 +277,7 @@ export class FoodController {
   @ApiQuery({ name: 'lat', required: true, type: Number })
   @ApiQuery({ name: 'lng', required: true, type: Number })
   @ApiQuery({ name: 'radius', required: false, type: Number, description: 'Radius in meters (default 3000)' })
+  @ApiQuery({ name: 'locale', required: false, type: String, description: 'Locale hint: vi / zh-TW / en' })
   @ApiResponse({ status: 200, description: 'Nearby grocery stores' })
   nearbyStores(
     @CurrentUser() _user: AuthUser,
@@ -276,12 +285,14 @@ export class FoodController {
     @Query('lat') lat: string,
     @Query('lng') lng: string,
     @Query('radius') radius?: string,
+    @Query('locale') locale?: string,
   ) {
     const dto: NearbyStoresDto = {
       query,
       lat: parseFloat(lat),
       lng: parseFloat(lng),
       radius: radius ? parseInt(radius, 10) : undefined,
+      locale,
     };
     return this.foodService.nearbyStores(dto);
   }

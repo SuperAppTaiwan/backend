@@ -64,6 +64,24 @@ export class CreateIngredientDto {
   @IsString()
   @MaxLength(500)
   declare notes?: string;
+
+  @ApiPropertyOptional({ description: 'How the ingredient was added: manual / camera_scan / ai', example: 'manual' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  declare sourceType?: string;
+
+  @ApiPropertyOptional({ description: 'How expiry was determined: manual / ai / label', example: 'manual' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  declare expirySource?: string;
+
+  @ApiPropertyOptional({ description: 'AI confidence score 0–1 when sourceType is camera_scan or ai' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  declare aiConfidence?: number;
 }
 
 export class UpdateIngredientDto {
@@ -212,6 +230,26 @@ export class CreateRecipeDto {
   @IsOptional()
   @IsArray()
   declare tagsJson?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  declare isAiGenerated?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare aiReason?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  declare missingIngredients?: string[];
+
+  @ApiPropertyOptional({ description: 'Nutrition info JSON { calories, protein, carbs, fat }' })
+  @IsOptional()
+  declare nutritionJson?: Record<string, unknown>;
 }
 
 export class UpdateRecipeDto {
@@ -269,6 +307,26 @@ export class UpdateRecipeDto {
   @IsOptional()
   @IsArray()
   declare tagsJson?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  declare isAiGenerated?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare aiReason?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  declare missingIngredients?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  declare nutritionJson?: Record<string, unknown>;
 }
 
 // ─── Meal Plan DTOs ───────────────────────────────────────────────────────────
@@ -304,6 +362,17 @@ export class CreateMealPlanDto {
   @IsString()
   @MaxLength(500)
   declare notes?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  declare isAiGenerated?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare aiReason?: string;
 }
 
 export class UpdateMealPlanDto {
@@ -407,6 +476,91 @@ export class SuggestMealDto {
   @ApiProperty({ enum: MealType })
   @IsEnum(MealType)
   declare mealType: MealType;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Meal names already shown or saved in this slot — backend must not suggest any of these',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare excludeMeals?: string[];
+}
+
+export class AcceptMealSuggestionDto {
+  @ApiProperty({ example: '2026-06-25', description: 'Date of the meal slot (YYYY-MM-DD)' })
+  @IsDateString()
+  declare planDate: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+
+  @ApiProperty({ description: 'Dish / meal name' })
+  @IsString()
+  @MaxLength(200)
+  declare mealName: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare description?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  declare prepMinutes?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  declare cookMinutes?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  declare servings?: number;
+
+  @ApiPropertyOptional({ enum: FoodCategory })
+  @IsOptional()
+  @IsEnum(FoodCategory)
+  declare category?: FoodCategory;
+
+  @ApiPropertyOptional({ type: [RecipeIngredientItemDto] })
+  @IsOptional()
+  @IsArray()
+  declare ingredientsJson?: RecipeIngredientItemDto[];
+
+  @ApiPropertyOptional({ type: [RecipeStepDto] })
+  @IsOptional()
+  @IsArray()
+  declare stepsJson?: RecipeStepDto[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare nutritionSummary?: string;
+
+  @ApiPropertyOptional({ description: 'Structured nutrition { calories, protein, carbs, fat, fiber }' })
+  @IsOptional()
+  declare nutritionJson?: Record<string, unknown>;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare aiReason?: string;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare missingIngredients?: string[];
 }
 
 export class NearbyStoresDto {
@@ -427,6 +581,11 @@ export class NearbyStoresDto {
   @IsNumber()
   @Min(100)
   declare radius?: number;
+
+  @ApiPropertyOptional({ description: 'Locale hint: vi / zh-TW / en', example: 'vi' })
+  @IsOptional()
+  @IsString()
+  declare locale?: string;
 }
 
 export class AddShoppingItemDto {
