@@ -5,6 +5,21 @@ import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
 
+const RECIPE_CATEGORY_IMAGES: Record<string, string> = {
+  VEGETABLE: 'https://images.unsplash.com/photo-1512621776951-a57ef8c7f0cc?w=400&h=300&fit=crop&auto=format&q=80',
+  FRUIT:     'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&h=300&fit=crop&auto=format&q=80',
+  MEAT:      'https://images.unsplash.com/photo-1529193591184-b1d58069ecdd?w=400&h=300&fit=crop&auto=format&q=80',
+  SEAFOOD:   'https://images.unsplash.com/photo-1534482421-64566f976cfa?w=400&h=300&fit=crop&auto=format&q=80',
+  DAIRY:     'https://images.unsplash.com/photo-1550583724-b2692b85b150?w=400&h=300&fit=crop&auto=format&q=80',
+  GRAIN:     'https://images.unsplash.com/photo-1586444248902-2f64eddc13df?w=400&h=300&fit=crop&auto=format&q=80',
+  LEGUME:    'https://images.unsplash.com/photo-1548550023-2bdb3c5beed7?w=400&h=300&fit=crop&auto=format&q=80',
+  CONDIMENT: 'https://images.unsplash.com/photo-1506368083636-6defca67c417?w=400&h=300&fit=crop&auto=format&q=80',
+  BEVERAGE:  'https://images.unsplash.com/photo-1544145945-f2cc9a85f2fd?w=400&h=300&fit=crop&auto=format&q=80',
+  SNACK:     'https://images.unsplash.com/photo-1566478532765-5d37de7f2c58?w=400&h=300&fit=crop&auto=format&q=80',
+  FROZEN:    'https://images.unsplash.com/photo-1548365328-8c6db3220f4e?w=400&h=300&fit=crop&auto=format&q=80',
+  OTHER:     'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=400&h=300&fit=crop&auto=format&q=80',
+};
+
 interface OverpassElement {
   id: number | string;
   lat?: number;
@@ -668,6 +683,7 @@ Rules:
     return recipes.map((r) => ({
       ...r,
       isAiGenerated: true,
+      imageUrl: RECIPE_CATEGORY_IMAGES[r.category as string] ?? RECIPE_CATEGORY_IMAGES['OTHER'],
       matchRate: this.calcMatchRate(r.ingredientsJson as { name: string }[], ingredientList.map((i) => i.name)),
     }));
   }
@@ -696,6 +712,7 @@ Rules:
         aiReason: 'Sử dụng nguyên liệu có sẵn, đơn giản và nhanh chóng.',
         tagsJson: ['quick', 'easy'],
         isAiGenerated: false,
+        imageUrl: RECIPE_CATEGORY_IMAGES['OTHER'],
         matchRate: 60,
       });
     }
