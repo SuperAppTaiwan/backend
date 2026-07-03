@@ -250,6 +250,18 @@ export class CreateRecipeDto {
   @ApiPropertyOptional({ description: 'Nutrition info JSON { calories, protein, carbs, fat }' })
   @IsOptional()
   declare nutritionJson?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ description: 'Recipe image URL' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare imageUrl?: string;
+
+  @ApiPropertyOptional({ description: 'Recipe source (AI, manual, etc.)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  declare source?: string;
 }
 
 export class UpdateRecipeDto {
@@ -327,6 +339,18 @@ export class UpdateRecipeDto {
   @ApiPropertyOptional()
   @IsOptional()
   declare nutritionJson?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ description: 'Recipe image URL' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare imageUrl?: string;
+
+  @ApiPropertyOptional({ description: 'Recipe source' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  declare source?: string;
 }
 
 // ─── Meal Plan DTOs ───────────────────────────────────────────────────────────

@@ -766,6 +766,8 @@ model Recipe {
   missingIngredients  Json?         @map("missing_ingredients")
   nutritionJson       Json?         @map("nutrition_json")
   aiReason            String?       @map("ai_reason")
+  imageUrl            String?       @map("image_url")
+  source              String?
   createdAt           DateTime      @default(now()) @map("created_at")
   updatedAt           DateTime      @updatedAt @map("updated_at")
 

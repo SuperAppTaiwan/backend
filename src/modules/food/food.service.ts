@@ -221,6 +221,8 @@ export class FoodService {
         tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
         missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
         nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
+        imageUrl: dto.imageUrl,
+        source: dto.source,
       },
     });
     await this.events.publish({ userId, eventType: EventType.RECIPE_CREATED, sourceModule: 'food', payload: { id: recipe.id, title: recipe.title } });
@@ -246,6 +248,8 @@ export class FoodService {
         tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : undefined,
         missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : undefined,
         nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : undefined,
+        imageUrl: dto.imageUrl !== undefined ? dto.imageUrl : undefined,
+        source: dto.source !== undefined ? dto.source : undefined,
       },
     });
     await this.events.publish({ userId, eventType: EventType.RECIPE_UPDATED, sourceModule: 'food', payload: { id } });
