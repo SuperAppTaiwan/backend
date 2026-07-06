@@ -81,7 +81,7 @@ describe('FoodService', () => {
   let service: FoodService;
   let prisma: MockedPrisma;
   let eventsService: { publish: jest.Mock };
-  let aiChain: { generateText: jest.Mock };
+  let aiChain: { generateText: jest.Mock; generateTextWithVision: jest.Mock };
 
   beforeEach(async () => {
     const mockPrisma = {
@@ -97,7 +97,7 @@ describe('FoodService', () => {
     };
 
     const mockEvents = { publish: jest.fn().mockResolvedValue(undefined) };
-    const mockAIChain = { generateText: jest.fn().mockResolvedValue('') };
+    const mockAIChain = { generateText: jest.fn().mockResolvedValue(''), generateTextWithVision: jest.fn().mockResolvedValue('') };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -112,7 +112,7 @@ describe('FoodService', () => {
     service = module.get<FoodService>(FoodService);
     prisma = module.get(PrismaService);
     eventsService = module.get(EventsService);
-    aiChain = module.get(AIProviderChain) as unknown as { generateText: jest.Mock };
+    aiChain = module.get(AIProviderChain) as unknown as { generateText: jest.Mock; generateTextWithVision: jest.Mock };
   });
 
   // ─── Ingredient ────────────────────────────────────────────────────────────
@@ -158,6 +158,24 @@ describe('FoodService', () => {
       const result = await service.createIngredient(USER_ID, { name: 'Cà rốt' });
       expect(result).toEqual(item);
       expect(eventsService.publish).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'INGREDIENT_CREATED', userId: USER_ID }));
+    });
+
+    it('forwards AI-scan metadata (freshnessStatus, estimatedDaysRemaining) to the created record', async () => {
+      const item = makeIngredient();
+      prisma.ingredient.create.mockResolvedValue(item as never);
+
+      await service.createIngredient(USER_ID, {
+        name: 'Sữa tươi',
+        sourceType: 'camera_scan',
+        freshnessStatus: 'near_expiry',
+        estimatedDaysRemaining: 2,
+      });
+
+      expect(prisma.ingredient.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ freshnessStatus: 'near_expiry', estimatedDaysRemaining: 2 }),
+        }),
+      );
     });
   });
 
@@ -223,6 +241,64 @@ describe('FoodService', () => {
       prisma.recipe.findMany.mockResolvedValue([makeRecipe()] as never);
       const result = await service.getRecipeRecommendations(USER_ID);
       expect(result).toHaveLength(0);
+    });
+  });
+
+  describe('generateRecipes', () => {
+    it('sends existing ingredients to the AI and marks results as based on inventory', async () => {
+      const ingredients = [makeIngredient({ name: 'Bánh Mì', category: FoodCategory.OTHER, quantity: { toString: () => '1' } })];
+      prisma.ingredient.findMany.mockResolvedValue(ingredients as never);
+      aiChain.generateText.mockResolvedValue(JSON.stringify([
+        { title: 'Bánh mì chiên trứng', category: 'OTHER', ingredientsJson: [{ name: 'Bánh Mì', quantity: 1, unit: 'PIECE' }], missingIngredients: ['Trứng'] },
+      ]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      expect(result).toHaveLength(1);
+      expect(result[0].basedOnInventory).toBe(true);
+      expect(result[0].isAiGenerated).toBe(true);
+      expect(result[0].matchRate).toBe(100);
+      expect(aiChain.generateText).toHaveBeenCalledWith(expect.stringContaining('Bánh Mì'));
+    });
+
+    it('does not return an empty list when the user has ingredients but the AI is unavailable, regardless of ingredient category', async () => {
+      // Regression test: previously the deterministic fallback only produced a suggestion for
+      // VEGETABLE/MEAT/SEAFOOD categories, so an OTHER-category ingredient (e.g. "Bánh Mì") silently
+      // produced zero recipes even though the user clearly had ingredients.
+      const ingredients = [makeIngredient({ name: 'Bánh Mì', category: FoodCategory.OTHER, quantity: { toString: () => '1' } })];
+      prisma.ingredient.findMany.mockResolvedValue(ingredients as never);
+      aiChain.generateText.mockResolvedValue('');
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(result[0].isAiGenerated).toBe(false);
+      expect(result[0].basedOnInventory).toBe(true);
+      expect(JSON.stringify((result[0] as Record<string, unknown>).ingredientsJson)).toContain('Bánh Mì');
+    });
+
+    it('generates generic popular recipes (not blocked) when the user has no ingredients and the AI responds', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue(JSON.stringify([
+        { title: 'Cơm chiên trứng', category: 'GRAIN', ingredientsJson: [], missingIngredients: [] },
+      ]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      expect(result).toHaveLength(1);
+      expect(result[0].basedOnInventory).toBe(false);
+      expect(result[0].matchRate).toBeUndefined();
+      expect(aiChain.generateText).toHaveBeenCalledWith(expect.stringContaining('no ingredients logged'));
+    });
+
+    it('falls back to generic recipes (not empty) when the user has no ingredients and the AI is unavailable', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue('');
+
+      const result = await service.generateRecipes(USER_ID, { count: 2 });
+
+      expect(result).toHaveLength(2);
+      expect(result.every((r) => r.basedOnInventory === false && r.isAiGenerated === false)).toBe(true);
     });
   });
 
@@ -544,6 +620,55 @@ describe('FoodService', () => {
           data: expect.objectContaining({ ingredientsJson, stepsJson }),
         }),
       );
+    });
+  });
+
+  // ─── scanIngredient ────────────────────────────────────────────────────────
+
+  describe('scanIngredient', () => {
+    it('coerces a lowercase/synonym unit and category from the AI into valid enum members', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({
+          isFood: true,
+          name: 'Carrot',
+          nameVi: 'Cà rốt',
+          category: 'vegetable',
+          quantity: 2,
+          unit: 'piece', // lowercase — would fail CreateIngredientDto's @IsEnum(UnitOfMeasure) as-is
+        }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.unit).toBe(UnitOfMeasure.PIECE);
+      expect(result.category).toBe(FoodCategory.VEGETABLE);
+    });
+
+    it('falls back to PIECE/OTHER when the AI returns a unit or category outside the enum', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({
+          isFood: true,
+          name: 'Mystery item',
+          category: 'not-a-real-category',
+          unit: 'quả', // hallucinated Vietnamese unit, not in UnitOfMeasure
+        }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.unit).toBe(UnitOfMeasure.PIECE);
+      expect(result.category).toBe(FoodCategory.OTHER);
+    });
+
+    it('passes through an already-valid unit and category unchanged', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({ isFood: true, name: 'Milk', category: 'DAIRY', unit: 'LITER' }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.unit).toBe(UnitOfMeasure.LITER);
+      expect(result.category).toBe(FoodCategory.DAIRY);
     });
   });
 });

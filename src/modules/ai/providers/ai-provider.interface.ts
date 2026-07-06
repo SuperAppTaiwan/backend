@@ -19,7 +19,11 @@ export interface AISummaryResponse {
 }
 
 export interface AIProvider {
+  readonly name: string;
   isAvailable(): boolean;
+  supportsVision(): boolean;
   chat(messages: AIChatMessage[]): Promise<AIChatResponse>;
   generateSummary(input: AISummaryInput): Promise<AISummaryResponse>;
+  generateText(prompt: string): Promise<string>;
+  generateTextWithVision(imageBase64: string, mimeType: string, prompt: string): Promise<string>;
 }

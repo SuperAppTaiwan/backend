@@ -13,7 +13,18 @@ const TIPS: string[] = [
 
 @Injectable()
 export class DeterministicAIProvider implements AIProvider {
+  readonly name = 'deterministic';
   isAvailable(): boolean { return true; }
+  supportsVision(): boolean { return false; }
+
+  async generateText(_prompt: string): Promise<string> {
+    const tip = TIPS[Math.floor(Math.random() * TIPS.length)];
+    return tip ?? '';
+  }
+
+  async generateTextWithVision(_imageBase64: string, _mimeType: string, _prompt: string): Promise<string> {
+    return '';
+  }
 
   async chat(messages: AIChatMessage[]): Promise<AIChatResponse> {
     const last = messages[messages.length - 1]?.content ?? '';
@@ -33,7 +44,7 @@ export class DeterministicAIProvider implements AIProvider {
       reply = `${tip} Có điều gì khác tôi có thể giúp bạn không?`;
     }
 
-    return { message: reply, provider: 'deterministic' };
+    return { message: reply, provider: this.name };
   }
 
   async generateSummary(input: AISummaryInput): Promise<AISummaryResponse> {
@@ -68,6 +79,6 @@ export class DeterministicAIProvider implements AIProvider {
       ? `Tóm tắt hôm nay: ${parts.join(' ')}`
       : 'Chào buổi sáng! Hãy bắt đầu ngày mới với một kế hoạch rõ ràng.';
 
-    return { summary, provider: 'deterministic' };
+    return { summary, provider: this.name };
   }
 }

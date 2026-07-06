@@ -82,6 +82,17 @@ export class CreateIngredientDto {
   @IsNumber()
   @Min(0)
   declare aiConfidence?: number;
+
+  @ApiPropertyOptional({ description: 'AI-estimated freshness: fresh / good / aging / near_expiry / expired' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  declare freshnessStatus?: string;
+
+  @ApiPropertyOptional({ description: 'AI-estimated days of shelf life remaining, when no OCR expiry date was found' })
+  @IsOptional()
+  @IsInt()
+  declare estimatedDaysRemaining?: number;
 }
 
 export class UpdateIngredientDto {

@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ExpenseCategoryType, PaymentMethod, Prisma, ShoppingListStatus } from '@prisma/client';
+import { ExpenseCategoryType, FoodCategory, PaymentMethod, Prisma, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
@@ -83,6 +83,16 @@ export class FoodService {
     }
   }
 
+  // AI responses sometimes drift from the requested enum (wrong case, a synonym,
+  // or an outright hallucinated value) — coerce to a valid Prisma enum member or fall back.
+  private normalizeEnumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+    if (typeof value === 'string') {
+      const match = allowed.find((v) => v === value.trim().toUpperCase());
+      if (match) return match;
+    }
+    return fallback;
+  }
+
   // ─── Ingredients ──────────────────────────────────────────────────────────
 
   async getIngredients(userId: string) {
@@ -126,6 +136,8 @@ export class FoodService {
         sourceType: dto.sourceType ?? 'manual',
         expirySource: dto.expirySource ?? 'manual',
         aiConfidence: dto.aiConfidence,
+        freshnessStatus: dto.freshnessStatus,
+        estimatedDaysRemaining: dto.estimatedDaysRemaining,
       },
     });
     await this.events.publish({ userId, eventType: EventType.INGREDIENT_CREATED, sourceModule: 'food', payload: { id: ingredient.id, name: ingredient.name } });
@@ -590,7 +602,11 @@ If the image is NOT food-related (e.g. a person, furniture, random object), set 
     }
 
     const result = this.safeJson<Record<string, unknown>>(raw, { isFood: false, aiConfidence: 0, reason: 'Không thể phân tích ảnh' });
-    return result;
+    return {
+      ...result,
+      category: this.normalizeEnumValue(result.category, Object.values(FoodCategory), FoodCategory.OTHER),
+      unit: this.normalizeEnumValue(result.unit, Object.values(UnitOfMeasure), UnitOfMeasure.PIECE),
+    };
   }
 
   // ─── AI: Recipe Generation ────────────────────────────────────────────────
@@ -623,19 +639,9 @@ If the image is NOT food-related (e.g. a person, furniture, random object), set 
       isExpiringSoon: expiringIngredients.some((e) => e.id === i.id),
     }));
 
-    if (ingredientList.length === 0) {
-      return [];
-    }
+    const hasInventory = ingredientList.length > 0;
 
-    const prompt = `You are a Vietnamese home cooking AI assistant. Generate ${count} practical recipe suggestions based on these available ingredients.
-
-Available ingredients:
-${JSON.stringify(ingredientList, null, 2)}
-
-PRIORITY: Use ingredients marked as isExpiringSoon=true first to minimize food waste.
-
-Return a JSON array of ${count} recipes:
-[
+    const responseSchema = `[
   {
     "title": string,           // Vietnamese dish name (also add English in parentheses)
     "description": string,     // 1-2 sentence description in Vietnamese
@@ -646,7 +652,7 @@ Return a JSON array of ${count} recipes:
     "ingredientsJson": [       // ingredients to use
       { "name": string, "quantity": number, "unit": string }
     ],
-    "missingIngredients": [string],  // ingredient names NOT in the available list but needed
+    "missingIngredients": [string],  // ingredients needed that aren't in the user's inventory
     "stepsJson": [
       { "step": number, "description": string }  // Vietnamese instructions
     ],
@@ -659,65 +665,201 @@ Return a JSON array of ${count} recipes:
     "aiReason": string,        // why this recipe is a good fit (Vietnamese)
     "tagsJson": [string]
   }
-]
+]`;
+
+    const prompt = hasInventory
+      ? `You are a Vietnamese home cooking AI assistant. Generate ${count} practical recipe suggestions that prioritize using the ingredients the user already has, to maximize ingredient usage and minimize food waste.
+
+Available ingredients:
+${JSON.stringify(ingredientList, null, 2)}
+
+PRIORITY: Use ingredients marked as isExpiringSoon=true first. It's fine for a recipe to need a few extra ingredients the user doesn't have — list those honestly in missingIngredients rather than refusing to suggest the recipe.
+
+Return a JSON array of ${count} recipes:
+${responseSchema}
 
 Rules:
-- Only suggest recipes that make sense with available ingredients
-- Mark missing ingredients honestly in missingIngredients array
+- Prioritize recipes that maximize use of the available ingredients above and minimize food waste
+- List any ingredient NOT in the available list in missingIngredients — suggesting a recipe with 1-2 extra items is fine
 - Use Vietnamese for descriptions and instructions
 - Keep instructions practical and specific
-- Prefer recipes using expiring ingredients`;
+- Prefer recipes using expiring ingredients`
+      : `You are a Vietnamese home cooking AI assistant. The user has no ingredients logged in their inventory yet. Generate ${count} popular, practical Vietnamese home-cooking recipes that most households can make with common pantry staples.
+
+Return a JSON array of ${count} recipes:
+${responseSchema}
+
+Rules:
+- Suggest broadly popular, approachable Vietnamese dishes — these are general suggestions, not based on any specific inventory
+- List the realistic ingredients each dish needs in ingredientsJson, and also copy them into missingIngredients since the user has none logged
+- Use Vietnamese for descriptions and instructions
+- Keep instructions practical and specific`;
 
     const raw = await this.aiChain.generateText(prompt);
+    const ownedNames = ingredientList.map((i) => i.name);
+
+    const finalize = (recipes: Record<string, unknown>[], isAiGenerated: boolean) =>
+      recipes.map((r) => ({
+        ...r,
+        isAiGenerated,
+        basedOnInventory: hasInventory,
+        imageUrl: RECIPE_CATEGORY_IMAGES[r.category as string] ?? RECIPE_CATEGORY_IMAGES['OTHER'],
+        matchRate: hasInventory ? this.calcMatchRate(r.ingredientsJson as { name: string }[], ownedNames) : undefined,
+      }));
 
     if (!raw) {
-      // Deterministic fallback
-      return this.deterministicRecipeSuggestions(ingredientList);
+      // Deterministic fallback (AI unavailable)
+      return finalize(this.deterministicRecipeSuggestions(ingredientList, count), false);
     }
 
     const recipes = this.safeJson<Record<string, unknown>[]>(raw, []);
     if (!Array.isArray(recipes) || recipes.length === 0) {
-      return this.deterministicRecipeSuggestions(ingredientList);
+      return finalize(this.deterministicRecipeSuggestions(ingredientList, count), false);
     }
 
-    return recipes.map((r) => ({
-      ...r,
-      isAiGenerated: true,
-      imageUrl: RECIPE_CATEGORY_IMAGES[r.category as string] ?? RECIPE_CATEGORY_IMAGES['OTHER'],
-      matchRate: this.calcMatchRate(r.ingredientsJson as { name: string }[], ingredientList.map((i) => i.name)),
-    }));
+    return finalize(recipes, true);
   }
 
-  private deterministicRecipeSuggestions(ingredients: { name: string; category: string }[]) {
-    const hasVeggies = ingredients.some((i) => i.category === 'VEGETABLE');
-    const hasMeat = ingredients.some((i) => i.category === 'MEAT' || i.category === 'SEAFOOD');
-    const suggestions = [];
+  private static readonly GENERIC_RECIPES: Array<Record<string, unknown>> = [
+    {
+      title: 'Cơm chiên trứng (Egg Fried Rice)',
+      description: 'Món cơm chiên đơn giản, nhanh gọn, phù hợp cho mọi bữa ăn.',
+      category: 'GRAIN',
+      servings: 2, prepMinutes: 10, cookMinutes: 10,
+      ingredientsJson: [
+        { name: 'Cơm nguội', quantity: 2, unit: 'CUP' },
+        { name: 'Trứng', quantity: 2, unit: 'PIECE' },
+        { name: 'Hành lá', quantity: 1, unit: 'PIECE' },
+      ],
+      stepsJson: [
+        { step: 1, description: 'Đánh tan trứng, phi thơm hành.' },
+        { step: 2, description: 'Cho cơm nguội vào xào đều tay trên lửa lớn.' },
+        { step: 3, description: 'Nêm nước mắm, hạt nêm vừa ăn, rắc hành lá.' },
+      ],
+      nutritionJson: { calories: 380, protein: '10g', carbs: '58g', fat: '10g' },
+      tagsJson: ['quick', 'easy'],
+    },
+    {
+      title: 'Canh rau củ thập cẩm (Mixed Vegetable Soup)',
+      description: 'Canh thanh đạm, dễ nấu với rau củ thông dụng.',
+      category: 'VEGETABLE',
+      servings: 3, prepMinutes: 10, cookMinutes: 20,
+      ingredientsJson: [
+        { name: 'Cà rốt', quantity: 1, unit: 'PIECE' },
+        { name: 'Khoai tây', quantity: 1, unit: 'PIECE' },
+        { name: 'Hành tây', quantity: 1, unit: 'PIECE' },
+      ],
+      stepsJson: [
+        { step: 1, description: 'Gọt vỏ, thái miếng vừa ăn các loại rau củ.' },
+        { step: 2, description: 'Đun sôi nước, cho rau củ vào nấu chín mềm.' },
+        { step: 3, description: 'Nêm gia vị vừa ăn, rắc hành ngò và tắt bếp.' },
+      ],
+      nutritionJson: { calories: 180, protein: '4g', carbs: '30g', fat: '2g' },
+      tagsJson: ['light', 'easy'],
+    },
+    {
+      title: 'Trứng chiên hành (Scallion Fried Egg)',
+      description: 'Món trứng chiên quen thuộc, nhanh chóng và đủ chất.',
+      category: 'DAIRY',
+      servings: 2, prepMinutes: 5, cookMinutes: 8,
+      ingredientsJson: [
+        { name: 'Trứng', quantity: 3, unit: 'PIECE' },
+        { name: 'Hành lá', quantity: 1, unit: 'PIECE' },
+      ],
+      stepsJson: [
+        { step: 1, description: 'Đánh tan trứng với hành lá thái nhỏ, nêm chút muối.' },
+        { step: 2, description: 'Làm nóng dầu, đổ trứng vào chiên vàng đều hai mặt.' },
+      ],
+      nutritionJson: { calories: 220, protein: '14g', carbs: '2g', fat: '17g' },
+      tagsJson: ['quick', 'easy'],
+    },
+    {
+      title: 'Mì xào thập cẩm (Mixed Stir-fried Noodles)',
+      description: 'Mì xào đơn giản với rau củ và trứng, no bụng và dễ làm.',
+      category: 'GRAIN',
+      servings: 2, prepMinutes: 10, cookMinutes: 12,
+      ingredientsJson: [
+        { name: 'Mì trứng', quantity: 2, unit: 'PACK' },
+        { name: 'Cà rốt', quantity: 1, unit: 'PIECE' },
+        { name: 'Trứng', quantity: 1, unit: 'PIECE' },
+      ],
+      stepsJson: [
+        { step: 1, description: 'Trụng mì qua nước sôi cho chín tới, để ráo.' },
+        { step: 2, description: 'Xào rau củ và trứng, sau đó cho mì vào đảo đều.' },
+        { step: 3, description: 'Nêm nước tương, tiêu vừa ăn.' },
+      ],
+      nutritionJson: { calories: 420, protein: '14g', carbs: '60g', fat: '12g' },
+      tagsJson: ['filling', 'easy'],
+    },
+  ];
 
-    if (hasVeggies || hasMeat) {
-      suggestions.push({
-        title: 'Cơm chiên rau củ (Fried Rice with Vegetables)',
-        description: 'Món cơm chiên đơn giản với rau củ có sẵn, dễ làm và bổ dưỡng.',
-        category: 'OTHER',
-        servings: 2,
-        prepMinutes: 10,
-        cookMinutes: 15,
-        ingredientsJson: ingredients.slice(0, 3).map((i) => ({ name: i.name, quantity: 1, unit: 'PIECE' })),
-        missingIngredients: ['cơm nguội', 'trứng', 'nước mắm'],
-        stepsJson: [
-          { step: 1, description: 'Chuẩn bị và thái nhỏ các loại rau củ.' },
-          { step: 2, description: 'Phi hành tỏi cho thơm rồi cho rau vào xào.' },
-          { step: 3, description: 'Cho cơm vào đảo đều, nêm nước mắm vừa ăn.' },
-        ],
-        nutritionJson: { calories: 350, protein: '12g', carbs: '55g', fat: '8g' },
-        aiReason: 'Sử dụng nguyên liệu có sẵn, đơn giản và nhanh chóng.',
-        tagsJson: ['quick', 'easy'],
-        isAiGenerated: false,
-        imageUrl: RECIPE_CATEGORY_IMAGES['OTHER'],
-        matchRate: 60,
-      });
+  private deterministicRecipeSuggestions(
+    ingredients: { name: string; category: string }[],
+    count: number,
+  ): Record<string, unknown>[] {
+    if (ingredients.length === 0) {
+      return FoodService.GENERIC_RECIPES.slice(0, count).map((r) => ({
+        ...r,
+        missingIngredients: (r.ingredientsJson as { name: string }[]).map((i) => i.name),
+        aiReason: 'Gợi ý món phổ biến, dễ làm — bạn chưa có nguyên liệu nào trong tủ.',
+      }));
     }
 
-    return suggestions;
+    const names = ingredients.map((i) => i.name);
+    const primary = names.slice(0, 3);
+    const category = ingredients[0].category ?? 'OTHER';
+    const toIngredients = (list: string[]) => list.map((name) => ({ name, quantity: 1, unit: 'PIECE' }));
+
+    const templates = [
+      {
+        title: `Món xào ${primary[0]} (Stir-fried ${primary[0]})`,
+        description: `Xào nhanh với ${primary.join(', ')} — tận dụng tối đa nguyên liệu đang có.`,
+        prepMinutes: 10, cookMinutes: 12,
+        stepsJson: [
+          { step: 1, description: `Sơ chế và thái nhỏ ${primary.join(', ')}.` },
+          { step: 2, description: 'Phi thơm tỏi, cho nguyên liệu vào xào trên lửa lớn.' },
+          { step: 3, description: 'Nêm nước mắm, hạt nêm vừa ăn rồi tắt bếp.' },
+        ],
+        calories: 350,
+      },
+      {
+        title: `Canh ${primary[0]} (${primary[0]} Soup)`,
+        description: `Canh thanh đạm nấu cùng ${primary.join(', ')}.`,
+        prepMinutes: 10, cookMinutes: 20,
+        stepsJson: [
+          { step: 1, description: `Sơ chế ${primary.join(', ')}, đun sôi nước.` },
+          { step: 2, description: 'Cho nguyên liệu vào nấu chín mềm.' },
+          { step: 3, description: 'Nêm gia vị vừa ăn, rắc hành ngò và tắt bếp.' },
+        ],
+        calories: 220,
+      },
+      {
+        title: `Cơm trộn ${primary[0]} (${primary[0]} Rice Bowl)`,
+        description: `Cơm trộn dinh dưỡng với ${primary.join(', ')} có sẵn.`,
+        prepMinutes: 10, cookMinutes: 15,
+        stepsJson: [
+          { step: 1, description: `Nấu chín ${primary.join(', ')} theo khẩu vị.` },
+          { step: 2, description: 'Trộn đều với cơm trắng nóng.' },
+          { step: 3, description: 'Rưới nước mắm hoặc sốt yêu thích lên trên.' },
+        ],
+        calories: 450,
+      },
+    ];
+
+    return templates.slice(0, count).map((t) => ({
+      title: t.title,
+      description: t.description,
+      category,
+      servings: 2,
+      prepMinutes: t.prepMinutes,
+      cookMinutes: t.cookMinutes,
+      ingredientsJson: toIngredients(primary),
+      missingIngredients: ['nước mắm', 'tỏi', 'dầu ăn'],
+      stepsJson: t.stepsJson,
+      nutritionJson: { calories: t.calories, protein: '12g', carbs: '35g', fat: '10g' },
+      aiReason: `Tận dụng ${primary.length} nguyên liệu bạn đang có (${primary.join(', ')}), hạn chế lãng phí thực phẩm.`,
+      tagsJson: ['quick', 'easy'],
+    }));
   }
 
   private calcMatchRate(recipeIngredients: { name: string }[] | unknown, owned: string[]): number {

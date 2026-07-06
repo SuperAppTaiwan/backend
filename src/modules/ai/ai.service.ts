@@ -3,8 +3,8 @@ import { AISuggestionStatus, AISuggestionType, NotificationType, Prisma } from '
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { DeterministicAIProvider } from './providers/deterministic-ai.provider.js';
-import { GeminiAIProvider } from './providers/gemini-ai.provider.js';
-import type { AIProvider, AIChatMessage } from './providers/ai-provider.interface.js';
+import { AIProviderChain } from './providers/ai-provider-chain.service.js';
+import type { AIChatMessage } from './providers/ai-provider.interface.js';
 
 interface SuggestionInput {
   type: AISuggestionType;
@@ -23,12 +23,8 @@ export class AIService {
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
     private readonly deterministicProvider: DeterministicAIProvider,
-    private readonly geminiProvider: GeminiAIProvider,
+    private readonly chain: AIProviderChain,
   ) {}
-
-  private getProvider(): AIProvider {
-    return this.geminiProvider.isAvailable() ? this.geminiProvider : this.deterministicProvider;
-  }
 
   // ─── AI Profile ──────────────────────────────────────────────────────────────
 
@@ -322,11 +318,10 @@ export class AIService {
       schedule: { overdueTasks: 0, completedThisWeek: 0 },
     };
 
-    const provider = this.getProvider();
     let summary: string;
     let providerName: string;
     try {
-      const result = await provider.generateSummary({ userId, context });
+      const result = await this.chain.generateSummary({ userId, context });
       summary = result.summary;
       providerName = result.provider;
     } catch {
@@ -430,10 +425,9 @@ export class AIService {
     }));
 
     // Get AI response
-    const provider = this.getProvider();
     let result: { message: string; provider: string };
     try {
-      result = await provider.chat(messages);
+      result = await this.chain.chat(messages);
     } catch {
       result = await this.deterministicProvider.chat(messages);
     }
@@ -475,10 +469,9 @@ export class AIService {
   // ─── Chat (stateless) ─────────────────────────────────────────────────────────
 
   async chat(userId: string, messages: AIChatMessage[]) {
-    const provider = this.getProvider();
     let result: { message: string; provider: string };
     try {
-      result = await provider.chat(messages);
+      result = await this.chain.chat(messages);
     } catch {
       result = await this.deterministicProvider.chat(messages);
     }

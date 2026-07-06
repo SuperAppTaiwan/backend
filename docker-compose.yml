@@ -39,6 +39,9 @@ services:
       dockerfile: Dockerfile
     container_name: ai_survival_api
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - '3000:3000'
     environment:
@@ -50,7 +53,7 @@ services:
       NODE_ENV: production
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
     depends_on:
       postgres:
         condition: service_healthy

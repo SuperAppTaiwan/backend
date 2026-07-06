@@ -5,6 +5,7 @@ import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 import { DeterministicAIProvider } from './providers/deterministic-ai.provider.js';
 import { GeminiAIProvider } from './providers/gemini-ai.provider.js';
+import { AIProviderChain, AI_PROVIDERS } from './providers/ai-provider-chain.service.js';
 import { ConfigService } from '@nestjs/config';
 
 const USER_ID = 'user-ai-test';
@@ -49,14 +50,19 @@ describe('AIService', () => {
       task: { findMany: jest.fn() },
     };
 
+    const mockDeterministic = new DeterministicAIProvider();
+    const mockChain = new AIProviderChain([mockDeterministic]);
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AIService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: EventsService, useValue: { publish: jest.fn() } },
         { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue(undefined) } },
-        DeterministicAIProvider,
-        GeminiAIProvider,
+        { provide: DeterministicAIProvider, useValue: mockDeterministic },
+        { provide: GeminiAIProvider, useValue: { isAvailable: () => false, chat: jest.fn(), generateSummary: jest.fn(), generateText: jest.fn(), generateTextWithVision: jest.fn(), name: 'gemini', supportsVision: () => false } },
+        { provide: AI_PROVIDERS, useValue: [mockDeterministic] },
+        { provide: AIProviderChain, useValue: mockChain },
       ],
     }).compile();
 
