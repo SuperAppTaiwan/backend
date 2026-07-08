@@ -289,6 +289,13 @@ export class FoodController {
     return this.foodService.scanIngredient(user.userId, dto);
   }
 
+  @Get('ingredients/barcode/:code')
+  @ApiOperation({ summary: 'Look up product info by barcode (EAN/UPC) via Open Food Facts' })
+  @ApiResponse({ status: 200, description: 'Product lookup result (found: false if not in database)' })
+  lookupBarcode(@Param('code') code: string) {
+    return this.foodService.lookupBarcode(code);
+  }
+
   @Post('recipes/generate')
   @ApiOperation({ summary: 'AI: Generate recipe suggestions from current ingredient inventory' })
   @ApiResponse({ status: 200, description: 'AI-generated recipe suggestions' })

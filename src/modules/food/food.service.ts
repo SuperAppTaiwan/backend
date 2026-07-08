@@ -908,6 +908,95 @@ If the image is NOT food-related (e.g. a person, furniture, random object), set 
     };
   }
 
+  // ─── Barcode Lookup ───────────────────────────────────────────────────────
+  // Open Food Facts is a free, keyless, community-run product database — no
+  // deterministic-fallback branch is needed here (unlike the Gemini calls
+  // above) since there is no API key to be missing in the first place.
+
+  private static readonly OFF_CATEGORY_RULES: Array<[RegExp, FoodCategory]> = [
+    [/vegetable|legume:vegetables/, FoodCategory.VEGETABLE],
+    [/\bfruit/, FoodCategory.FRUIT],
+    [/meat|poultry|beef|pork|chicken|sausage/, FoodCategory.MEAT],
+    [/fish|seafood|shrimp|shellfish|salmon|tuna/, FoodCategory.SEAFOOD],
+    [/dairy|milk|cheese|yogurt|yoghurt|butter/, FoodCategory.DAIRY],
+    [/cereal|grain|rice|bread|pasta|noodle|flour/, FoodCategory.GRAIN],
+    [/legume|bean|lentil|tofu|soy/, FoodCategory.LEGUME],
+    [/condiment|sauce|spice|seasoning|dressing/, FoodCategory.CONDIMENT],
+    [/beverage|drink|juice|soda|water|tea|coffee/, FoodCategory.BEVERAGE],
+    [/snack|chip|candy|chocolate|cookie|biscuit/, FoodCategory.SNACK],
+    [/frozen/, FoodCategory.FROZEN],
+  ];
+
+  private mapOffCategoryToFoodCategory(tags: string[]): FoodCategory {
+    const joined = tags.join(' ').toLowerCase();
+    for (const [re, cat] of FoodService.OFF_CATEGORY_RULES) {
+      if (re.test(joined)) return cat;
+    }
+    return FoodCategory.OTHER;
+  }
+
+  private mapOffQuantityToUnit(quantityStr: string): UnitOfMeasure {
+    const q = quantityStr.toLowerCase();
+    if (/kg/.test(q)) return UnitOfMeasure.KG;
+    if (/ml|millilit/.test(q)) return UnitOfMeasure.ML;
+    if (/\bl\b|liter|litre/.test(q)) return UnitOfMeasure.LITER;
+    if (/\bg\b|gram/.test(q)) return UnitOfMeasure.GRAM;
+    return UnitOfMeasure.PIECE;
+  }
+
+  async lookupBarcode(barcode: string) {
+    const code = barcode.replace(/\D/g, '');
+    if (!code) {
+      return { found: false, barcode, reason: 'Mã vạch không hợp lệ' };
+    }
+
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${code}.json`, {
+        signal: AbortSignal.timeout(6000),
+        headers: { 'User-Agent': 'AISurvivalOS-Taiwan/1.0' },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json() as {
+        status: number;
+        product?: {
+          product_name?: string;
+          product_name_vi?: string;
+          generic_name?: string;
+          categories_tags?: string[];
+          quantity?: string;
+          brands?: string;
+          image_front_url?: string;
+          image_url?: string;
+        };
+      };
+
+      if (data.status !== 1 || !data.product) {
+        return { found: false, barcode: code, reason: 'Không tìm thấy sản phẩm với mã vạch này. Vui lòng nhập thủ công.' };
+      }
+
+      const p = data.product;
+      const name = p.product_name || p.generic_name || '';
+      const nameVi = p.product_name_vi || name;
+
+      return {
+        found: true,
+        barcode: code,
+        name,
+        nameVi,
+        category: this.mapOffCategoryToFoodCategory(p.categories_tags ?? []),
+        unit: this.mapOffQuantityToUnit(p.quantity ?? ''),
+        quantity: 1,
+        brand: p.brands ?? null,
+        imageUrl: p.image_front_url ?? p.image_url ?? null,
+        reason: name ? `Tìm thấy: ${name}${p.brands ? ` (${p.brands})` : ''}` : 'Tìm thấy sản phẩm nhưng thiếu tên.',
+      };
+    } catch (err) {
+      this.logger.warn(`Barcode lookup failed for ${code}: ${(err as Error).message}`);
+      return { found: false, barcode: code, reason: 'Không thể tra cứu mã vạch lúc này. Vui lòng thử lại hoặc nhập thủ công.' };
+    }
+  }
+
   // ─── AI: Recipe Generation ────────────────────────────────────────────────
 
   async generateRecipes(userId: string, dto: GenerateRecipesDto) {

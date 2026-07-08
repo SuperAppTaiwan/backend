@@ -917,4 +917,91 @@ describe('FoodService', () => {
       expect(result.category).toBe(FoodCategory.DAIRY);
     });
   });
+
+  // ─── lookupBarcode ─────────────────────────────────────────────────────────
+
+  describe('lookupBarcode', () => {
+    beforeEach(() => {
+      global.fetch = jest.fn();
+    });
+
+    it('returns found:false without calling the network for a non-numeric barcode', async () => {
+      const result = await service.lookupBarcode('not-a-barcode!!');
+
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(result.found).toBe(false);
+    });
+
+    it('maps a found product to name/category/unit', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: 1,
+          product: {
+            product_name: 'Fresh Milk',
+            categories_tags: ['en:dairies', 'en:milks'],
+            quantity: '1 L',
+            brands: 'Kuang Chuan',
+            image_front_url: 'https://example.com/milk.jpg',
+          },
+        }),
+      });
+
+      const result = await service.lookupBarcode('4710011401352');
+
+      expect(result.found).toBe(true);
+      expect(result.name).toBe('Fresh Milk');
+      expect(result.category).toBe(FoodCategory.DAIRY);
+      expect(result.unit).toBe(UnitOfMeasure.LITER);
+      expect(result.brand).toBe('Kuang Chuan');
+      expect(result.imageUrl).toBe('https://example.com/milk.jpg');
+    });
+
+    it('strips non-digit characters (e.g. dashes) before querying', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 1, product: { product_name: 'Item' } }),
+      });
+
+      await service.lookupBarcode('471-0011-401352');
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('4710011401352'),
+        expect.anything(),
+      );
+    });
+
+    it('returns found:false when Open Food Facts has no match (status 0)', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 0 }),
+      });
+
+      const result = await service.lookupBarcode('0000000000000');
+
+      expect(result.found).toBe(false);
+      expect(result.reason).toContain('Không tìm thấy');
+    });
+
+    it('returns found:false when the network request fails', async () => {
+      (global.fetch as jest.Mock).mockRejectedValue(new Error('Network unreachable'));
+
+      const result = await service.lookupBarcode('4710011401352');
+
+      expect(result.found).toBe(false);
+      expect(result.reason).toContain('Không thể tra cứu');
+    });
+
+    it('defaults to OTHER/PIECE when the product has no recognizable category or quantity', async () => {
+      (global.fetch as jest.Mock).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 1, product: { product_name: 'Mystery Snack' } }),
+      });
+
+      const result = await service.lookupBarcode('1234567890123');
+
+      expect(result.category).toBe(FoodCategory.OTHER);
+      expect(result.unit).toBe(UnitOfMeasure.PIECE);
+    });
+  });
 });
