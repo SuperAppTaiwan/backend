@@ -60,6 +60,11 @@ import type {
   AcceptMealSuggestionDto,
   NearbyStoresDto,
   AddShoppingItemDto,
+  GetRecipesQueryDto,
+  ValidateRecipesDto,
+  AddRecipesDto,
+  AiSuggestMealDto,
+  SaveAiSuggestionDto,
 } from './dto/food.dto.js';
 
 @Injectable()
@@ -91,6 +96,61 @@ export class FoodService {
       if (match) return match;
     }
     return fallback;
+  }
+
+  // ─── Recipe duplicate detection ────────────────────────────────────────────
+
+  private normalizeRecipeName(name: string): string {
+    return (name ?? '')
+      .normalize('NFD').replace(/[̀-ͯ]/g, '') // strip accents
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, '') // strip punctuation
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private tokenSimilarity(a: string, b: string): number {
+    const tokensA = new Set(a.split(' ').filter(Boolean));
+    const tokensB = new Set(b.split(' ').filter(Boolean));
+    if (tokensA.size === 0 || tokensB.size === 0) return 0;
+    const intersection = [...tokensA].filter((t) => tokensB.has(t)).length;
+    const union = new Set([...tokensA, ...tokensB]).size;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  private ingredientOverlap(a: { name: string }[] = [], b: { name: string }[] = []): number {
+    if (!a.length || !b.length) return 0;
+    const setA = new Set(a.map((i) => this.normalizeRecipeName(i.name)));
+    const setB = new Set(b.map((i) => this.normalizeRecipeName(i.name)));
+    const intersection = [...setA].filter((n) => setB.has(n)).length;
+    const union = new Set([...setA, ...setB]).size;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  // Threshold-based match on normalized name + ingredient overlap, scoped strictly to
+  // this user's own recipes — never compares across other users' recipe databases.
+  async findExistingUserRecipe(
+    userId: string,
+    candidate: { name: string; ingredients?: { name: string }[] },
+  ) {
+    const normalizedCandidate = this.normalizeRecipeName(candidate.name);
+    if (!normalizedCandidate) return null;
+
+    const recipes = await this.prisma.recipe.findMany({ where: { userId } });
+
+    for (const recipe of recipes) {
+      const normalizedExisting = this.normalizeRecipeName(recipe.title);
+      if (normalizedExisting === normalizedCandidate) return recipe;
+
+      const nameSim = this.tokenSimilarity(normalizedCandidate, normalizedExisting);
+      if (nameSim >= 0.6) return recipe;
+
+      if (candidate.ingredients?.length) {
+        const overlap = this.ingredientOverlap(candidate.ingredients, recipe.ingredientsJson as { name: string }[]);
+        if (overlap >= 0.6 && nameSim >= 0.3) return recipe;
+      }
+    }
+    return null;
   }
 
   // ─── Ingredients ──────────────────────────────────────────────────────────
@@ -228,6 +288,43 @@ export class FoodService {
     const recipe = await this.prisma.recipe.findFirst({ where: { id, userId } });
     if (!recipe) throw new NotFoundException('Recipe not found');
     return recipe;
+  }
+
+  // search/mealType filter recipes owned by the user; only paginates (returns an envelope)
+  // when page/limit are explicitly requested, so existing callers that fetch the full list
+  // (e.g. mobile recipes screen) keep receiving a plain array unchanged.
+  async getRecipesFiltered(userId: string, query: GetRecipesQueryDto) {
+    const all = await this.prisma.recipe.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const search = query.search?.trim().toLowerCase();
+    const mealType = query.mealType?.toLowerCase();
+
+    const filtered = all.filter((r) => {
+      if (search && !r.title.toLowerCase().includes(search)) return false;
+      if (mealType) {
+        const tags = Array.isArray(r.tagsJson) ? (r.tagsJson as string[]).map((t) => String(t).toLowerCase()) : [];
+        if (tags.length > 0 && !tags.includes(mealType)) return false;
+      }
+      return true;
+    });
+
+    if (!query.page && !query.limit) {
+      return filtered;
+    }
+
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+    const start = (page - 1) * limit;
+
+    return {
+      data: filtered.slice(start, start + limit),
+      total: filtered.length,
+      page,
+      limit,
+    };
   }
 
   async createRecipe(userId: string, dto: CreateRecipeDto) {
@@ -387,6 +484,208 @@ export class FoodService {
     await this.prisma.mealPlan.delete({ where: { id } });
     await this.events.publish({ userId, eventType: EventType.MEAL_PLAN_DELETED, sourceModule: 'food', payload: { id } });
     return { message: 'Meal plan deleted' };
+  }
+
+  // ─── Meal Plan v2: recipe picker + AI dedupe flow ────────────────────────────
+
+  private static readonly MEAL_CALORIE_RANGE: Record<string, [number, number]> = {
+    BREAKFAST: [300, 550],
+    LUNCH: [400, 700],
+    DINNER: [300, 550],
+    SNACK: [50, 250],
+  };
+
+  private static readonly DAILY_CALORIE_MAX = 2400;
+
+  // Loads recipes by id scoped to the current user; throws 404 if any id doesn't
+  // belong to them (per CLAUDE.md rule: never expose 403 — missing/forbidden both 404).
+  private async getUserRecipesByIds(userId: string, recipeIds: string[]) {
+    const recipes = await this.prisma.recipe.findMany({ where: { userId, id: { in: recipeIds } } });
+    const found = new Set(recipes.map((r) => r.id));
+    const missing = recipeIds.filter((id) => !found.has(id));
+    if (missing.length > 0) throw new NotFoundException(`Recipe(s) not found: ${missing.join(', ')}`);
+    return recipes;
+  }
+
+  async validateRecipesForMealPlan(userId: string, dto: ValidateRecipesDto) {
+    const recipes = await this.getUserRecipesByIds(userId, dto.recipeIds);
+
+    const warnings: string[] = [];
+    let hasIncompleteNutrition = false;
+    let totalCalories = 0;
+    for (const recipe of recipes) {
+      const calories = (recipe.nutritionJson as { calories?: number } | null)?.calories;
+      if (typeof calories !== 'number') hasIncompleteNutrition = true;
+      else totalCalories += calories;
+    }
+
+    const [minCal, maxCal] = FoodService.MEAL_CALORIE_RANGE[dto.mealType] ?? [0, Infinity];
+    if (totalCalories > maxCal) {
+      warnings.push(`This ${dto.mealType.toLowerCase()} totals ~${totalCalories} kcal, above the recommended ${minCal}–${maxCal} kcal range.`);
+    } else if (totalCalories > 0 && totalCalories < minCal) {
+      warnings.push(`This ${dto.mealType.toLowerCase()} totals ~${totalCalories} kcal, below the recommended ${minCal}–${maxCal} kcal range.`);
+    }
+
+    const planDateObj = new Date(dto.date);
+    const weekStart = new Date(planDateObj);
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+
+    const existingMeals = await this.prisma.mealPlan.findMany({
+      where: { userId, planDate: { gte: weekStart, lt: weekEnd } },
+      include: { recipe: { select: { nutritionJson: true } } },
+    });
+
+    const dayCalories = existingMeals
+      .filter((m) => m.planDate.toISOString().slice(0, 10) === dto.date)
+      .reduce((sum, m) => sum + ((m.recipe?.nutritionJson as { calories?: number } | null)?.calories ?? 0), 0)
+      + totalCalories;
+
+    if (dayCalories > FoodService.DAILY_CALORIE_MAX) {
+      warnings.push(`Adding this meal brings today's total to ~${dayCalories} kcal, above the recommended daily target of ${FoodService.DAILY_CALORIE_MAX} kcal.`);
+    }
+
+    if (hasIncompleteNutrition) {
+      warnings.push('Nutrition information is incomplete for one or more selected recipes.');
+    }
+
+    const isSuitable = warnings.length === 0;
+    let aiAdvice = '';
+
+    if (!isSuitable) {
+      const prompt = `You are a nutritionist. A user wants to add these recipes to their ${dto.mealType} on ${dto.date}:
+${recipes.map((r) => `- ${r.title}`).join('\n')}
+
+Detected issues:
+${warnings.join('\n')}
+
+Write ONE short, friendly Vietnamese sentence of practical advice (max 40 words) — acknowledge they can still eat it, but suggest an adjustment (smaller portion, lighter next meal, etc). No markdown, just the sentence.`;
+      const raw = await this.aiChain.generateText(prompt);
+      aiAdvice = raw?.trim() || 'Bạn vẫn có thể dùng bữa này, nhưng hãy cân nhắc giảm khẩu phần hoặc chọn món nhẹ hơn cho bữa sau.';
+    }
+
+    return { isSuitable, warnings, aiAdvice };
+  }
+
+  async addRecipesToMealPlan(userId: string, dto: AddRecipesDto) {
+    const recipes = await this.getUserRecipesByIds(userId, dto.recipeIds);
+    const planDate = new Date(dto.date);
+
+    const existing = await this.prisma.mealPlan.findMany({
+      where: { userId, planDate, mealType: dto.mealType, recipeId: { in: dto.recipeIds } },
+    });
+    const existingRecipeIds = new Set(existing.map((m) => m.recipeId));
+
+    const toCreate = recipes.filter((r) => !existingRecipeIds.has(r.id));
+    const skippedDuplicates = recipes.filter((r) => existingRecipeIds.has(r.id)).map((r) => r.title);
+
+    const created = [];
+    for (const recipe of toCreate) {
+      const plan = await this.prisma.mealPlan.create({
+        data: { userId, planDate, mealType: dto.mealType, recipeId: recipe.id, servings: 1, isAiGenerated: false },
+        include: { recipe: { select: { id: true, title: true } } },
+      });
+      created.push(plan);
+      await this.events.publish({ userId, eventType: EventType.MEAL_PLAN_CREATED, sourceModule: 'food', payload: { id: plan.id, date: dto.date, recipeId: recipe.id } });
+    }
+
+    return { created, skippedDuplicates };
+  }
+
+  async aiSuggestMeals(userId: string, dto: AiSuggestMealDto) {
+    const suggestion = (await this.suggestMeal(userId, {
+      planDate: dto.date,
+      mealType: dto.mealType,
+      excludeMeals: dto.excludeRecipeNames,
+    })) as Record<string, unknown>;
+
+    const mealName = (suggestion.mealName as string) ?? '';
+    const ingredients = (suggestion.ingredientsJson as { name: string }[]) ?? [];
+
+    const dup = await this.findExistingUserRecipe(userId, { name: mealName, ingredients });
+    const excludedIds = new Set(dto.excludeRecipeIds ?? []);
+    const isDuplicate = !!dup && !excludedIds.has(dup.id);
+
+    return {
+      suggestions: [
+        {
+          name: mealName,
+          description: suggestion.description ?? '',
+          calories: suggestion.estimatedCalories ?? null,
+          nutrition: suggestion.nutritionJson ?? null,
+          ingredients,
+          stepsJson: suggestion.stepsJson ?? [],
+          category: suggestion.category ?? 'OTHER',
+          prepMinutes: suggestion.prepMinutes ?? 0,
+          cookMinutes: suggestion.cookMinutes ?? 0,
+          servings: suggestion.servings ?? 1,
+          aiReason: suggestion.aiReason ?? '',
+          ingredientsFromInventory: suggestion.ingredientsFromInventory ?? [],
+          missingIngredients: suggestion.missingIngredients ?? [],
+          duplicateStatus: isDuplicate ? 'existing' : 'new',
+          existingRecipeId: isDuplicate ? (dup?.id ?? null) : null,
+        },
+      ],
+      aiAdvice: (suggestion.aiReason as string) ?? '',
+      isBusySlot: (suggestion.isBusySlot as boolean) ?? false,
+    };
+  }
+
+  async saveAiSuggestion(userId: string, dto: SaveAiSuggestionDto) {
+    const s = dto.suggestion;
+    const ingredients = s.ingredients ?? [];
+
+    const existingRecipe = await this.findExistingUserRecipe(userId, { name: s.name, ingredients });
+
+    const recipe = existingRecipe ?? await (async () => {
+      const created = await this.prisma.recipe.create({
+        data: {
+          userId,
+          title: s.name,
+          description: s.description ?? null,
+          servings: s.servings ?? 2,
+          prepMinutes: s.prepMinutes ?? 0,
+          cookMinutes: s.cookMinutes ?? 15,
+          isPublic: false,
+          isAiGenerated: true,
+          aiReason: s.aiReason ?? null,
+          category: s.category ?? FoodCategory.OTHER,
+          ingredientsJson: (ingredients as unknown) as Prisma.InputJsonValue,
+          stepsJson: ((s.stepsJson?.length ? s.stepsJson : [{ step: 1, description: 'Chuẩn bị nguyên liệu và chế biến theo khẩu vị.' }]) as unknown) as Prisma.InputJsonValue,
+          nutritionJson: (s.nutrition ?? (s.calories ? { calories: s.calories } : undefined)) as unknown as Prisma.InputJsonValue ?? Prisma.JsonNull,
+          tagsJson: Prisma.JsonNull,
+        },
+      });
+      await this.events.publish({ userId, eventType: EventType.RECIPE_CREATED, sourceModule: 'food', payload: { id: created.id, title: created.title } });
+      return created;
+    })();
+
+    const planDate = new Date(dto.date);
+    const existingPlan = await this.prisma.mealPlan.findFirst({
+      where: { userId, planDate, mealType: dto.mealType, recipeId: recipe.id },
+      include: { recipe: { select: { id: true, title: true } } },
+    });
+
+    const mealPlan = existingPlan ?? await (async () => {
+      const created = await this.prisma.mealPlan.create({
+        data: {
+          userId,
+          planDate,
+          mealType: dto.mealType,
+          recipeId: recipe.id,
+          servings: s.servings ?? 1,
+          isAiGenerated: true,
+          aiReason: s.aiReason ?? null,
+        },
+        include: { recipe: { select: { id: true, title: true } } },
+      });
+      await this.events.publish({ userId, eventType: EventType.MEAL_PLAN_CREATED, sourceModule: 'food', payload: { id: created.id, date: dto.date, recipeId: recipe.id } });
+      return created;
+    })();
+
+    return { recipe, mealPlan, reusedExistingRecipe: !!existingRecipe };
   }
 
   // ─── Shopping Lists ───────────────────────────────────────────────────────

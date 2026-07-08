@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDateString,
@@ -10,6 +11,8 @@ import {
   MaxLength,
   Min,
   IsArray,
+  ArrayMinSize,
+  ValidateNested,
 } from 'class-validator';
 import { FoodCategory, MealType, UnitOfMeasure } from '@prisma/client';
 
@@ -621,6 +624,170 @@ export class NearbyStoresDto {
   @IsOptional()
   @IsString()
   declare locale?: string;
+}
+
+// ─── Meal Plan v2: recipe picker + AI dedupe flow ────────────────────────────
+
+export class GetRecipesQueryDto {
+  @ApiPropertyOptional({ description: 'Search by recipe title' })
+  @IsOptional()
+  @IsString()
+  declare search?: string;
+
+  @ApiPropertyOptional({ enum: MealType })
+  @IsOptional()
+  @IsEnum(MealType)
+  declare mealType?: MealType;
+
+  @ApiPropertyOptional({ example: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  declare page?: number;
+
+  @ApiPropertyOptional({ example: 20 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  declare limit?: number;
+}
+
+export class ValidateRecipesDto {
+  @ApiProperty({ example: '2026-07-07' })
+  @IsDateString()
+  declare date: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  declare recipeIds: string[];
+}
+
+export class AddRecipesDto {
+  @ApiProperty({ example: '2026-07-07' })
+  @IsDateString()
+  declare date: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @IsString({ each: true })
+  declare recipeIds: string[];
+
+  @ApiPropertyOptional({ description: 'Save even if validate-recipes reported nutrition warnings' })
+  @IsOptional()
+  @IsBoolean()
+  declare ignoreWarnings?: boolean;
+}
+
+export class AiSuggestMealDto {
+  @ApiProperty({ example: '2026-07-07' })
+  @IsDateString()
+  declare date: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+
+  @ApiPropertyOptional({ type: [String], description: 'Recipe ids already shown/rejected for this slot' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare excludeRecipeIds?: string[];
+
+  @ApiPropertyOptional({ type: [String], description: 'Recipe/meal names already shown/rejected for this slot' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare excludeRecipeNames?: string[];
+}
+
+export class AiSuggestionPayloadDto {
+  @ApiProperty()
+  @IsString()
+  @MaxLength(200)
+  declare name: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare description?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  declare calories?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  declare nutrition?: Record<string, unknown>;
+
+  @ApiPropertyOptional({ type: [RecipeIngredientItemDto] })
+  @IsOptional()
+  @IsArray()
+  declare ingredients?: RecipeIngredientItemDto[];
+
+  @ApiPropertyOptional({ type: [RecipeStepDto] })
+  @IsOptional()
+  @IsArray()
+  declare stepsJson?: RecipeStepDto[];
+
+  @ApiPropertyOptional({ enum: FoodCategory })
+  @IsOptional()
+  @IsEnum(FoodCategory)
+  declare category?: FoodCategory;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  declare prepMinutes?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  declare cookMinutes?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  declare servings?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  declare aiReason?: string;
+}
+
+export class SaveAiSuggestionDto {
+  @ApiProperty({ example: '2026-07-07' })
+  @IsDateString()
+  declare date: string;
+
+  @ApiProperty({ enum: MealType })
+  @IsEnum(MealType)
+  declare mealType: MealType;
+
+  @ApiProperty({ type: AiSuggestionPayloadDto })
+  @ValidateNested()
+  @Type(() => AiSuggestionPayloadDto)
+  declare suggestion: AiSuggestionPayloadDto;
 }
 
 export class AddShoppingItemDto {

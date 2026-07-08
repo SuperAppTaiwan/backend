@@ -623,6 +623,252 @@ describe('FoodService', () => {
     });
   });
 
+  // ─── findExistingUserRecipe (duplicate detection) ────────────────────────────
+
+  describe('findExistingUserRecipe', () => {
+    it('matches on exact normalized name regardless of accents/case/punctuation', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-1', title: 'Canh Cà Rốt!' })] as never);
+
+      const found = await service.findExistingUserRecipe(USER_ID, { name: 'canh ca rot' });
+
+      expect(found?.id).toBe('r-1');
+    });
+
+    it('matches near-duplicate names via token similarity', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-2', title: 'Canh cà rốt thịt bằm' })] as never);
+
+      const found = await service.findExistingUserRecipe(USER_ID, { name: 'Canh cà rốt' });
+
+      expect(found?.id).toBe('r-2');
+    });
+
+    it('matches on high ingredient overlap with a loosely similar name', async () => {
+      prisma.recipe.findMany.mockResolvedValue([
+        makeRecipe({
+          id: 'r-3',
+          title: 'Trứng chiên hành',
+          ingredientsJson: [{ name: 'Trứng', quantity: 3, unit: 'PIECE' }, { name: 'Hành lá', quantity: 1, unit: 'PIECE' }],
+        }),
+      ] as never);
+
+      const found = await service.findExistingUserRecipe(USER_ID, {
+        name: 'Trứng chiên',
+        ingredients: [{ name: 'Trứng' }, { name: 'Hành lá' }],
+      });
+
+      expect(found?.id).toBe('r-3');
+    });
+
+    it('returns null when no recipe is similar enough', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-4', title: 'Bún bò Huế' })] as never);
+
+      const found = await service.findExistingUserRecipe(USER_ID, { name: 'Cơm chiên trứng' });
+
+      expect(found).toBeNull();
+    });
+
+    it('only queries recipes scoped to the given userId', async () => {
+      prisma.recipe.findMany.mockResolvedValue([]);
+
+      await service.findExistingUserRecipe(USER_ID, { name: 'Phở bò' });
+
+      expect(prisma.recipe.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: USER_ID } }));
+    });
+  });
+
+  // ─── validateRecipesForMealPlan ───────────────────────────────────────────────
+
+  describe('validateRecipesForMealPlan', () => {
+    it('throws NotFoundException when a recipe id does not belong to the user', async () => {
+      prisma.recipe.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.validateRecipesForMealPlan(USER_ID, { date: '2026-07-07', mealType: MealType.BREAKFAST, recipeIds: ['missing-1'] }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('is suitable with no AI call when calories are within the meal-type range', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-1', nutritionJson: { calories: 400 } })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+
+      const result = await service.validateRecipesForMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.BREAKFAST,
+        recipeIds: ['r-1'],
+      });
+
+      expect(result.isSuitable).toBe(true);
+      expect(result.warnings).toHaveLength(0);
+      expect(result.aiAdvice).toBe('');
+      expect(aiChain.generateText).not.toHaveBeenCalled();
+    });
+
+    it('flags too-high calories for the meal type and calls AI for advice', async () => {
+      prisma.recipe.findMany.mockResolvedValueOnce([makeRecipe({ id: 'r-1', title: 'Lẩu thập cẩm', nutritionJson: { calories: 1200 } })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue('Bạn nên ăn ít lại hoặc chọn món nhẹ hơn.');
+
+      const result = await service.validateRecipesForMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.SNACK,
+        recipeIds: ['r-1'],
+      });
+
+      expect(result.isSuitable).toBe(false);
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.aiAdvice).toBe('Bạn nên ăn ít lại hoặc chọn món nhẹ hơn.');
+      expect(aiChain.generateText).toHaveBeenCalled();
+    });
+
+    it('falls back to a deterministic advice message when AI is unavailable', async () => {
+      prisma.recipe.findMany.mockResolvedValueOnce([makeRecipe({ id: 'r-1', nutritionJson: { calories: 1200 } })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue('');
+
+      const result = await service.validateRecipesForMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.SNACK,
+        recipeIds: ['r-1'],
+      });
+
+      expect(result.isSuitable).toBe(false);
+      expect(result.aiAdvice.length).toBeGreaterThan(0);
+    });
+
+    it('flags incomplete nutrition data as a warning', async () => {
+      prisma.recipe.findMany.mockResolvedValueOnce([makeRecipe({ id: 'r-1', nutritionJson: null })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue('advice');
+
+      const result = await service.validateRecipesForMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.LUNCH,
+        recipeIds: ['r-1'],
+      });
+
+      expect(result.isSuitable).toBe(false);
+      expect(result.warnings.some((w) => w.toLowerCase().includes('incomplete'))).toBe(true);
+    });
+
+    it('only validates recipes owned by the current user', async () => {
+      prisma.recipe.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.validateRecipesForMealPlan(USER_ID, { date: '2026-07-07', mealType: MealType.LUNCH, recipeIds: ['other-users-recipe'] }),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.recipe.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: USER_ID }) }),
+      );
+    });
+  });
+
+  // ─── addRecipesToMealPlan ──────────────────────────────────────────────────────
+
+  describe('addRecipesToMealPlan', () => {
+    it('creates meal plan entries referencing existing recipe ids without creating new recipes', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-1' }), makeRecipe({ id: 'r-2', title: 'Trứng chiên' })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([]);
+      prisma.mealPlan.create
+        .mockResolvedValueOnce({ id: 'mp-1', recipeId: 'r-1' } as never)
+        .mockResolvedValueOnce({ id: 'mp-2', recipeId: 'r-2' } as never);
+
+      const result = await service.addRecipesToMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.BREAKFAST,
+        recipeIds: ['r-1', 'r-2'],
+      });
+
+      expect(prisma.recipe.create).not.toHaveBeenCalled();
+      expect(prisma.mealPlan.create).toHaveBeenCalledTimes(2);
+      expect(result.created).toHaveLength(2);
+      expect(result.skippedDuplicates).toHaveLength(0);
+    });
+
+    it('skips recipes already present in the same date + mealType slot', async () => {
+      prisma.recipe.findMany.mockResolvedValue([makeRecipe({ id: 'r-1', title: 'Canh cà rốt' })] as never);
+      prisma.mealPlan.findMany.mockResolvedValue([{ id: 'existing-mp', recipeId: 'r-1' }] as never);
+
+      const result = await service.addRecipesToMealPlan(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.BREAKFAST,
+        recipeIds: ['r-1'],
+      });
+
+      expect(prisma.mealPlan.create).not.toHaveBeenCalled();
+      expect(result.created).toHaveLength(0);
+      expect(result.skippedDuplicates).toEqual(['Canh cà rốt']);
+    });
+
+    it('throws NotFoundException when a recipe does not belong to the user', async () => {
+      prisma.recipe.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.addRecipesToMealPlan(USER_ID, { date: '2026-07-07', mealType: MealType.LUNCH, recipeIds: ['not-mine'] }),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ─── saveAiSuggestion ──────────────────────────────────────────────────────────
+
+  describe('saveAiSuggestion', () => {
+    it('creates a new recipe when no duplicate exists, then links it to the meal slot', async () => {
+      prisma.recipe.findMany.mockResolvedValue([]); // no existing recipes → no duplicate
+      const createdRecipe = makeRecipe({ id: 'new-recipe-1', title: 'Cháo gà' });
+      prisma.recipe.create.mockResolvedValue(createdRecipe as never);
+      prisma.mealPlan.findFirst.mockResolvedValue(null);
+      prisma.mealPlan.create.mockResolvedValue({ id: 'mp-new-1', recipeId: 'new-recipe-1' } as never);
+
+      const result = await service.saveAiSuggestion(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.DINNER,
+        suggestion: { name: 'Cháo gà', calories: 300, ingredients: [{ name: 'Gà', quantity: 200, unit: 'GRAM' }] },
+      });
+
+      expect(prisma.recipe.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ title: 'Cháo gà', isAiGenerated: true }) }),
+      );
+      expect(prisma.mealPlan.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ recipeId: 'new-recipe-1' }) }),
+      );
+      expect(result.reusedExistingRecipe).toBe(false);
+    });
+
+    it('reuses an existing recipe instead of creating a duplicate when one already matches', async () => {
+      const existingRecipe = makeRecipe({ id: 'existing-recipe-1', title: 'Cháo gà' });
+      prisma.recipe.findMany.mockResolvedValue([existingRecipe] as never);
+      prisma.mealPlan.findFirst.mockResolvedValue(null);
+      prisma.mealPlan.create.mockResolvedValue({ id: 'mp-new-2', recipeId: 'existing-recipe-1' } as never);
+
+      const result = await service.saveAiSuggestion(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.DINNER,
+        suggestion: { name: 'Cháo gà', calories: 300 },
+      });
+
+      expect(prisma.recipe.create).not.toHaveBeenCalled();
+      expect(prisma.mealPlan.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ recipeId: 'existing-recipe-1' }) }),
+      );
+      expect(result.reusedExistingRecipe).toBe(true);
+    });
+
+    it('does not create a duplicate meal item when the slot already has this recipe', async () => {
+      const existingRecipe = makeRecipe({ id: 'existing-recipe-2', title: 'Cháo gà' });
+      prisma.recipe.findMany.mockResolvedValue([existingRecipe] as never);
+      const existingPlan = { id: 'mp-existing', recipeId: 'existing-recipe-2' };
+      prisma.mealPlan.findFirst.mockResolvedValue(existingPlan as never);
+
+      const result = await service.saveAiSuggestion(USER_ID, {
+        date: '2026-07-07',
+        mealType: MealType.DINNER,
+        suggestion: { name: 'Cháo gà' },
+      });
+
+      expect(prisma.mealPlan.create).not.toHaveBeenCalled();
+      expect(result.mealPlan).toBe(existingPlan);
+    });
+  });
+
   // ─── scanIngredient ────────────────────────────────────────────────────────
 
   describe('scanIngredient', () => {
