@@ -129,6 +129,11 @@ enum TaskStatus {
   OVERDUE
 }
 
+enum TaskSchedulingMode {
+  FIXED
+  AI_AUTO
+}
+
 // AI enums
 enum AISuggestionType {
   FINANCE
@@ -588,29 +593,53 @@ model FixedEvent {
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 
+  seriesId                String?   @map("series_id")
+  originalOccurrenceStart DateTime? @map("original_occurrence_start")
+  isRecurrenceException   Boolean   @default(false) @map("is_recurrence_exception")
+  isCancelled             Boolean   @default(false) @map("is_cancelled")
+  recurrenceEndAt         DateTime? @map("recurrence_end_at")
+  recurrenceTimezone      String?   @map("recurrence_timezone")
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, startTime])
+  @@index([userId, seriesId])
   @@map("fixed_events")
 }
 
 model Task {
-  id               String       @id @default(cuid())
-  userId           String       @map("user_id")
+  id               String             @id @default(cuid())
+  userId           String             @map("user_id")
   title            String
   description      String?
-  priority         TaskPriority @default(MEDIUM)
-  status           TaskStatus   @default(TODO)
+  priority         TaskPriority       @default(MEDIUM)
+  status           TaskStatus         @default(TODO)
   deadline         DateTime?
-  estimatedMinutes Int?         @map("estimated_minutes")
-  scheduledStart   DateTime?    @map("scheduled_start")
-  scheduledEnd     DateTime?    @map("scheduled_end")
-  sourceModule     String       @default("manual") @map("source_module")
-  sourceEntityId   String?      @map("source_entity_id")
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  estimatedMinutes Int?               @map("estimated_minutes")
+  scheduledStart   DateTime?          @map("scheduled_start")
+  scheduledEnd     DateTime?          @map("scheduled_end")
+  sourceModule     String             @default("manual") @map("source_module")
+  sourceEntityId   String?            @map("source_entity_id")
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  schedulingMode          TaskSchedulingMode @default(AI_AUTO) @map("scheduling_mode")
+  timezone                String             @default("Asia/Taipei")
+  recurrenceRule          String?            @map("recurrence_rule")
+  recurrenceTimezone      String?            @map("recurrence_timezone")
+  recurrenceEndAt         DateTime?          @map("recurrence_end_at")
+  seriesId                String?            @map("series_id")
+  originalOccurrenceStart DateTime?          @map("original_occurrence_start")
+  isRecurrenceException   Boolean            @default(false) @map("is_recurrence_exception")
+  isCancelled             Boolean            @default(false) @map("is_cancelled")
+  aiConstraints           Json?              @map("ai_constraints")
+  scheduleReason          String?            @map("schedule_reason")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, scheduledStart])
+  @@index([userId, status])
+  @@index([userId, seriesId])
   @@map("tasks")
 }
 
