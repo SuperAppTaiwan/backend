@@ -70,6 +70,7 @@ describe('ScheduleEventsService', () => {
   let service: ScheduleEventsService;
   let prismaMock: PrismaMock;
   let eventsService: jest.Mocked<EventsService>;
+  let recurrenceService: RecurrenceService;
 
   beforeEach(async () => {
     prismaMock = {
@@ -114,6 +115,7 @@ describe('ScheduleEventsService', () => {
 
     service = module.get(ScheduleEventsService);
     eventsService = module.get(EventsService) as jest.Mocked<EventsService>;
+    recurrenceService = module.get(RecurrenceService);
   });
 
   // ── listEvents ──────────────────────────────────────────────────────────────
@@ -268,6 +270,16 @@ describe('ScheduleEventsService', () => {
   // ── createEvent: AI_AUTO mode ───────────────────────────────────────────────
 
   describe('createEvent — AI_AUTO mode', () => {
+    const FIXED_NOW = new Date('2026-07-20T06:00:00.000Z'); // Monday 06:00 UTC = 14:00 Asia/Taipei
+
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(FIXED_NOW);
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it('requires estimatedDurationMinutes', async () => {
       await expect(service.createEvent('u1', { title: 'X', schedulingMode: 'AI_AUTO' } as CreateScheduleEventDto)).rejects.toThrow(
         BadRequestException,
@@ -339,6 +351,153 @@ describe('ScheduleEventsService', () => {
       expect(result.startAt).toBeNull();
       expect(result.endAt).toBeNull();
       expect(result.scheduleReason).toBeTruthy();
+    });
+
+    it('avoids an existing fixed event when placing the AI_AUTO slot', async () => {
+      // Block the entire morning (08:00-12:00 Asia/Taipei = 00:00-04:00 UTC) with a fixed event
+      // on the same day as FIXED_NOW, so a MORNING-preferred AI task must skip to the next
+      // available morning rather than overlapping it.
+      prismaMock.fixedEvent.findMany.mockResolvedValue([
+        makeFixedEvent({
+          id: 'busy-morning',
+          startTime: new Date('2026-07-21T00:00:00.000Z'), // 08:00 Taipei next day
+          endTime: new Date('2026-07-21T04:00:00.000Z'), // 12:00 Taipei next day
+        }),
+      ]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-avoid' }));
+
+      const result = await service.createEvent('u1', {
+        title: 'Avoid fixed event',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 60,
+        constraints: { preferredTimeOfDay: 'MORNING', allowedWeekdays: ['TU'] }, // Jul 21 is Tuesday
+      } as CreateScheduleEventDto);
+
+      const start = new Date(result.startAt!);
+      const end = new Date(result.endAt!);
+      const busyStart = new Date('2026-07-21T00:00:00.000Z');
+      const busyEnd = new Date('2026-07-21T04:00:00.000Z');
+      const overlaps = start < busyEnd && end > busyStart;
+      expect(overlaps).toBe(false);
+    });
+
+    it('never places the AI_AUTO slot after the given deadline', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-deadline' }));
+
+      const deadline = '2026-07-22T10:00:00.000Z';
+      const result = await service.createEvent('u1', {
+        title: 'Respect deadline',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 30,
+        deadline,
+      } as CreateScheduleEventDto);
+
+      expect(new Date(result.endAt!).getTime()).toBeLessThanOrEqual(new Date(deadline).getTime());
+    });
+
+    it('returns 422 (not a late/incorrect slot) when the deadline is too tight for any valid slot', async () => {
+      // FIXED_NOW is 14:00 Taipei; EVENING window is 18:00-22:00; a deadline just 1 hour from
+      // now (15:00 Taipei) is well before the evening window even opens today, and the search
+      // window itself collapses to under an hour with no allowed-weekday relaxation possible
+      // (canSplit/allowedWeekdays untouched) — must reject, never silently return a bad slot.
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+
+      await expect(
+        service.createEvent('u1', {
+          title: 'Impossible deadline',
+          schedulingMode: 'AI_AUTO',
+          estimatedDurationMinutes: 60,
+          deadline: '2026-07-20T07:00:00.000Z', // 1 hour from FIXED_NOW
+          constraints: { preferredTimeOfDay: 'EVENING' },
+        } as CreateScheduleEventDto),
+      ).rejects.toThrow(UnprocessableEntityException);
+    });
+
+    it('respects earliest/latest allowed time-of-day window', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-window' }));
+
+      const result = await service.createEvent('u1', {
+        title: 'Narrow window',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 60,
+        constraints: { earliestStartTime: '20:00', latestEndTime: '21:00' },
+      } as CreateScheduleEventDto);
+
+      const localHour = new Date(result.startAt!).toLocaleString('en-US', { timeZone: 'Asia/Taipei', hour: '2-digit', hour12: false });
+      expect(localHour.trim().padStart(2, '0').slice(0, 2)).toBe('20');
+    });
+
+    it('respects allowedWeekdays (only places the slot on an allowed weekday)', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-weekday' }));
+
+      // FIXED_NOW is Monday; restrict to Saturday only.
+      const result = await service.createEvent('u1', {
+        title: 'Saturday only',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 60,
+        deadline: '2026-08-01T00:00:00.000Z',
+        constraints: { allowedWeekdays: ['SA'] },
+      } as CreateScheduleEventDto);
+
+      const weekday = new Date(result.startAt!).toLocaleString('en-US', { timeZone: 'Asia/Taipei', weekday: 'short' });
+      expect(weekday).toBe('Sat');
+    });
+
+    it('respects the requested duration exactly', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-duration' }));
+
+      const result = await service.createEvent('u1', {
+        title: 'Exact duration',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 45,
+      } as CreateScheduleEventDto);
+
+      const durationMs = new Date(result.endAt!).getTime() - new Date(result.startAt!).getTime();
+      expect(durationMs).toBe(45 * 60_000);
+    });
+
+    it('creates exactly one session (one Task row) when canSplit is false, never multiple partial blocks', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: 'ai-nosplit' }));
+
+      await service.createEvent('u1', {
+        title: 'No split',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 90,
+        constraints: { canSplit: false },
+      } as CreateScheduleEventDto);
+
+      expect(prismaMock.task.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('documents current behavior: a retried identical AI_AUTO request creates a second, separate task (no idempotency-key dedup exists anywhere in this API)', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+      let counter = 0;
+      prismaMock.task.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...makeTask(), ...data, id: `ai-retry-${counter++}` }));
+
+      const payload = {
+        title: 'Retried request',
+        schedulingMode: 'AI_AUTO',
+        estimatedDurationMinutes: 30,
+      } as CreateScheduleEventDto;
+
+      const first = await service.createEvent('u1', payload);
+      const second = await service.createEvent('u1', payload);
+
+      expect(first.id).not.toBe(second.id);
+      expect(prismaMock.task.create).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -436,6 +595,50 @@ describe('ScheduleEventsService', () => {
       expect(prismaMock.fixedEvent.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'fe1' }, data: expect.objectContaining({ recurrenceEndAt: expect.any(Date) }) }),
       );
+    });
+
+    it('FOLLOWING scope on a COUNT-bounded series preserves the exact remaining COUNT (does not go unbounded)', async () => {
+      // 10 weekly Mondays starting 2026-07-06: 07-06(1) 07-13(2) 07-20(3) 07-27(4) 08-03(5)
+      // 08-10(6) 08-17(7) 08-24(8) 08-31(9) 09-07(10). Splitting AT occurrence #5 (08-03) means
+      // 4 occurrences (#1-4) stay on the old (truncated) series and 6 occurrences (#5-10) must
+      // land on the new series — i.e. the new series' rule must carry COUNT=6, not an unbounded
+      // or NEVER-ending rule (which would silently fabricate occurrences #11+ that were never
+      // part of the original 10-occurrence series).
+      const master = makeFixedEvent({
+        id: 'fe1',
+        startTime: d('2026-07-06T09:00:00.000Z'),
+        endTime: d('2026-07-06T10:00:00.000Z'),
+        recurrenceRule: 'FREQ=WEEKLY;BYDAY=MO;COUNT=10',
+        recurrenceTimezone: 'Asia/Taipei',
+      });
+      prismaMock.fixedEvent.findUnique.mockResolvedValue(master);
+      prismaMock.fixedEvent.update.mockResolvedValue({ ...master, recurrenceEndAt: d('2026-08-02T23:59:59.000Z') });
+      prismaMock.fixedEvent.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ ...data, id: 'fe2' }));
+
+      const occurrenceStart = d('2026-08-03T09:00:00.000Z');
+      const result = await service.updateEvent(
+        'u1',
+        'fixed-event',
+        'fe1',
+        {} as UpdateScheduleEventDto,
+        'FOLLOWING',
+        occurrenceStart,
+      );
+
+      expect(result.recurrenceRule).toContain('COUNT=6');
+      expect(result.recurrenceRule).not.toContain('COUNT=10');
+
+      // Expand the derived new-series rule over a generous window and confirm it produces
+      // *exactly* 6 occurrences, the last being 2026-09-07 (the original series' true 10th and
+      // final occurrence) — proving no extra/unbounded occurrences leak past what the original
+      // 10-occurrence series would have produced.
+      const expanded = recurrenceService.expandOccurrences(
+        { id: 'fe2', startTime: occurrenceStart, endTime: d('2026-08-03T10:00:00.000Z'), recurrenceRule: result.recurrenceRule, recurrenceTimezone: 'Asia/Taipei', recurrenceEndAt: null },
+        d('2026-08-01T00:00:00.000Z'),
+        d('2027-01-01T00:00:00.000Z'),
+      );
+      expect(expanded).toHaveLength(6);
+      expect(expanded[expanded.length - 1].occurrenceStart.toISOString().slice(0, 10)).toBe('2026-09-07');
     });
 
     it('propagates a rejection from $transaction without applying partial writes (rollback safety)', async () => {
@@ -559,6 +762,177 @@ describe('ScheduleEventsService', () => {
       });
       const errors = await validate(dto);
       expect(errors).toHaveLength(0);
+    });
+
+    it('fails validation for an invalid recurrence.frequency', async () => {
+      const dto = plainToInstance(CreateScheduleEventDto, {
+        title: 'Bad recurrence',
+        schedulingMode: 'FIXED',
+        startAt: '2026-07-20T09:00:00.000Z',
+        endAt: '2026-07-20T10:00:00.000Z',
+        recurrence: { frequency: 'DAILY' },
+      });
+      const errors = await validate(dto);
+      const recurrenceError = errors.find((e) => e.property === 'recurrence');
+      expect(recurrenceError).toBeDefined();
+      expect(recurrenceError?.children?.some((c) => c.property === 'frequency')).toBe(true);
+    });
+
+    it('fails validation for an out-of-range recurrence.interval', async () => {
+      const dto = plainToInstance(CreateScheduleEventDto, {
+        title: 'Bad interval',
+        schedulingMode: 'FIXED',
+        startAt: '2026-07-20T09:00:00.000Z',
+        endAt: '2026-07-20T10:00:00.000Z',
+        recurrence: { frequency: 'WEEKLY', interval: 0 },
+      });
+      const errors = await validate(dto);
+      const recurrenceError = errors.find((e) => e.property === 'recurrence');
+      expect(recurrenceError?.children?.some((c) => c.property === 'interval')).toBe(true);
+    });
+
+    it('fails validation for an invalid byWeekday code', async () => {
+      const dto = plainToInstance(CreateScheduleEventDto, {
+        title: 'Bad weekday',
+        schedulingMode: 'FIXED',
+        startAt: '2026-07-20T09:00:00.000Z',
+        endAt: '2026-07-20T10:00:00.000Z',
+        recurrence: { frequency: 'WEEKLY', byWeekday: ['ZZ'] },
+      });
+      const errors = await validate(dto);
+      const recurrenceError = errors.find((e) => e.property === 'recurrence');
+      expect(recurrenceError?.children?.some((c) => c.property === 'byWeekday')).toBe(true);
+    });
+  });
+
+  // ── Standard error-body shape ───────────────────────────────────────────────
+
+  describe('error response body shape', () => {
+    it('409 conflict body matches the project-standard {statusCode, message, error} shape plus conflicts', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([
+        makeFixedEvent({ id: 'fe1', startTime: d('2026-07-20T09:00:00Z'), endTime: d('2026-07-20T10:00:00Z') }),
+      ]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+
+      try {
+        await service.createEvent('u1', {
+          title: 'Conflict',
+          schedulingMode: 'FIXED',
+          startAt: '2026-07-20T09:30:00.000Z',
+          endAt: '2026-07-20T10:30:00.000Z',
+        } as CreateScheduleEventDto);
+        throw new Error('expected ConflictException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConflictException);
+        const body = (err as ConflictException).getResponse() as Record<string, unknown>;
+        expect(body).toMatchObject({ statusCode: 409, error: 'Conflict', message: 'SCHEDULE_CONFLICT' });
+        expect(Array.isArray(body.conflicts)).toBe(true);
+      }
+    });
+
+    it('422 no-slot body matches the project-standard {statusCode, message, error} shape plus reason/suggestions', async () => {
+      prismaMock.fixedEvent.findMany.mockResolvedValue([]);
+      prismaMock.task.findMany.mockResolvedValue([]);
+
+      try {
+        await service.createEvent('u1', {
+          title: 'No slot',
+          schedulingMode: 'AI_AUTO',
+          estimatedDurationMinutes: 60,
+          constraints: {
+            preferredDateRangeStart: '2026-07-01T00:00:00.000Z',
+            preferredDateRangeEnd: '2026-06-30T00:00:00.000Z',
+          },
+        } as CreateScheduleEventDto);
+        throw new Error('expected UnprocessableEntityException');
+      } catch (err) {
+        expect(err).toBeInstanceOf(UnprocessableEntityException);
+        const body = (err as UnprocessableEntityException).getResponse() as Record<string, unknown>;
+        expect(body).toMatchObject({ statusCode: 422, error: 'Unprocessable Entity', message: 'NO_SLOT_AVAILABLE' });
+        expect(typeof body.reason).toBe('string');
+        expect(Array.isArray(body.suggestions)).toBe(true);
+      }
+    });
+  });
+
+  // ── Ownership isolation (query-level) ───────────────────────────────────────
+
+  describe('ownership isolation', () => {
+    it('listEvents scopes both fixedEvent and task queries to the calling userId', async () => {
+      await service.listEvents('u1', d('2026-07-01T00:00:00Z'), d('2026-07-31T00:00:00Z'));
+
+      expect(prismaMock.fixedEvent.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
+      );
+      expect(prismaMock.task.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
+      );
+    });
+
+    it('recurrence-exception lookups are also scoped to the calling userId (no cross-user leak)', async () => {
+      const master = makeFixedEvent({ id: 'fe1', recurrenceRule: 'FREQ=WEEKLY;BYDAY=MO' });
+      prismaMock.fixedEvent.findMany.mockResolvedValueOnce([master]).mockResolvedValueOnce([]);
+
+      await service.listEvents('u1', d('2026-07-01T00:00:00Z'), d('2026-07-31T00:00:00Z'));
+
+      const exceptionsCall = prismaMock.fixedEvent.findMany.mock.calls[1][0];
+      expect(exceptionsCall.where).toEqual(
+        expect.objectContaining({ userId: 'u1', isRecurrenceException: true }),
+      );
+    });
+
+    it('checkConflicts scopes both fixedEvent and task queries to the calling userId', async () => {
+      await service.checkConflicts('u1', d('2026-07-20T09:00:00Z'), d('2026-07-20T10:00:00Z'));
+
+      expect(prismaMock.fixedEvent.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
+      );
+      expect(prismaMock.task.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }) }),
+      );
+    });
+  });
+
+  // ── Conflict-check excludes cancelled/deleted/exception rows ───────────────
+
+  describe('checkConflicts excludes cancelled and exception rows at the query level', () => {
+    it('fixedEvent query filters isCancelled: false and isRecurrenceException: false', async () => {
+      await service.checkConflicts('u1', d('2026-07-20T09:00:00Z'), d('2026-07-20T10:00:00Z'));
+
+      expect(prismaMock.fixedEvent.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ isCancelled: false, isRecurrenceException: false }),
+        }),
+      );
+    });
+
+    it('task query filters isCancelled: false, isRecurrenceException: false, and schedulingMode FIXED', async () => {
+      await service.checkConflicts('u1', d('2026-07-20T09:00:00Z'), d('2026-07-20T10:00:00Z'));
+
+      expect(prismaMock.task.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ isCancelled: false, isRecurrenceException: false, schedulingMode: 'FIXED' }),
+        }),
+      );
+    });
+  });
+
+  // ── listEvents excludes cancelled/exception master rows ─────────────────────
+
+  describe('listEvents excludes cancelled and raw-exception rows from the top-level query', () => {
+    it('fixedEvent and task queries filter isCancelled: false and isRecurrenceException: false', async () => {
+      await service.listEvents('u1', d('2026-07-01T00:00:00Z'), d('2026-07-31T00:00:00Z'));
+
+      expect(prismaMock.fixedEvent.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ isCancelled: false, isRecurrenceException: false }),
+        }),
+      );
+      expect(prismaMock.task.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ isCancelled: false, isRecurrenceException: false }),
+        }),
+      );
     });
   });
 });

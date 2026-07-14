@@ -220,6 +220,122 @@ describe('RecurrenceService', () => {
       expect(occurrences).toHaveLength(3);
     });
 
+    it('cuts off a monthly expansion at UNTIL', () => {
+      const dtstart = new Date('2026-01-15T09:00:00.000Z');
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: new Date(dtstart.getTime() + 30 * 60_000),
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=15;UNTIL=20260315T235959Z',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2026-01-01T00:00:00Z'),
+        new Date('2026-12-31T00:00:00Z'),
+      );
+      // Jan 15, Feb 15, Mar 15 only
+      expect(occurrences).toHaveLength(3);
+    });
+
+    it('limits a monthly expansion with COUNT', () => {
+      const dtstart = new Date('2026-01-15T09:00:00.000Z');
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: new Date(dtstart.getTime() + 30 * 60_000),
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=15;COUNT=4',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2026-01-01T00:00:00Z'),
+        new Date('2026-12-31T00:00:00Z'),
+      );
+      expect(occurrences).toHaveLength(4);
+    });
+
+    it('correctly expands when the visible range begins in the middle of an existing series', () => {
+      // Series starts Jun 1 (Monday), weekly. Querying a visible range that starts well after
+      // the series' own dtstart (e.g. a user paging their calendar to late July) must still
+      // return exactly the occurrences that fall inside the requested window — no missing first
+      // occurrence, no occurrence bleeding in from before the window.
+      const dtstart = new Date('2026-06-01T09:00:00.000Z'); // Monday
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: new Date(dtstart.getTime() + 30 * 60_000),
+        recurrenceRule: 'FREQ=WEEKLY;BYDAY=MO',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      // Visible range starts mid-series (Jul 20), well after dtstart (Jun 1).
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2026-07-20T00:00:00Z'),
+        new Date('2026-08-10T00:00:00Z'),
+      );
+      const dates = occurrences.map((o) => o.occurrenceStart.toISOString().slice(0, 10));
+      expect(dates).toEqual(['2026-07-20', '2026-07-27', '2026-08-03']);
+      // Sanity: none of the pre-window occurrences (Jun 1, Jun 8, ... Jul 13) leaked in.
+      expect(dates).not.toContain('2026-07-13');
+    });
+
+    it('handles a leap year: monthly BYMONTHDAY=29 includes Feb in a leap year but skips it otherwise', () => {
+      const dtstart = new Date('2026-01-29T09:00:00.000Z');
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: new Date(dtstart.getTime() + 30 * 60_000),
+        recurrenceRule: 'FREQ=MONTHLY;BYMONTHDAY=29',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      // 2026 is NOT a leap year -> Feb 29 does not exist -> Feb is skipped.
+      const occurrences2026 = service.expandOccurrences(
+        master,
+        new Date('2026-01-01T00:00:00Z'),
+        new Date('2026-04-01T00:00:00Z'),
+      );
+      const months2026 = occurrences2026.map((o) => o.occurrenceStart.getUTCMonth() + 1);
+      expect(months2026).toEqual([1, 3]); // Jan, Mar — Feb skipped
+
+      // 2028 IS a leap year -> Feb 29 exists -> Feb is included.
+      const dtstart2028 = new Date('2028-01-29T09:00:00.000Z');
+      const master2028 = { ...master, startTime: dtstart2028, endTime: new Date(dtstart2028.getTime() + 30 * 60_000) };
+      const occurrences2028 = service.expandOccurrences(
+        master2028,
+        new Date('2028-01-01T00:00:00Z'),
+        new Date('2028-04-01T00:00:00Z'),
+      );
+      const dates2028 = occurrences2028.map((o) => o.occurrenceStart.toISOString().slice(0, 10));
+      expect(dates2028).toEqual(['2028-01-29', '2028-02-29', '2028-03-29']);
+    });
+
+    it('correctly expands a weekly series across a year boundary (Dec -> Jan)', () => {
+      const dtstart = new Date('2026-12-14T09:00:00.000Z'); // Monday
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: new Date(dtstart.getTime() + 30 * 60_000),
+        recurrenceRule: 'FREQ=WEEKLY;BYDAY=MO',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2026-12-01T00:00:00Z'),
+        new Date('2027-01-31T00:00:00Z'),
+      );
+      const dates = occurrences.map((o) => o.occurrenceStart.toISOString().slice(0, 10));
+      expect(dates).toEqual([
+        '2026-12-14', '2026-12-21', '2026-12-28',
+        '2027-01-04', '2027-01-11', '2027-01-18', '2027-01-25',
+      ]);
+    });
+
     it('is idempotent: expanding the same range twice yields no duplicates and identical results', () => {
       const dtstart = new Date('2026-07-06T09:00:00.000Z');
       const master = {

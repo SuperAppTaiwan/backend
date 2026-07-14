@@ -228,7 +228,7 @@ export class ScheduleEventsService {
     if (!dto.forceCreate) {
       const conflictResult = await this.checkConflicts(userId, startAt, endAt);
       if (conflictResult.hasConflict) {
-        throw new ConflictException({ message: 'SCHEDULE_CONFLICT', conflicts: conflictResult.conflicts });
+        throw new ConflictException(this.conflictErrorBody(conflictResult.conflicts));
       }
     }
 
@@ -284,11 +284,9 @@ export class ScheduleEventsService {
     if (!result) {
       if (!dto.allowUnscheduled) {
         const suggestions = await this.buildSuggestions(userId, dto, priority, timezone);
-        throw new UnprocessableEntityException({
-          message: 'NO_SLOT_AVAILABLE',
-          reason: 'Không tìm thấy khung giờ trống phù hợp trước hạn chót.',
-          suggestions,
-        });
+        throw new UnprocessableEntityException(
+          this.noSlotErrorBody('Không tìm thấy khung giờ trống phù hợp trước hạn chót.', suggestions),
+        );
       }
 
       const task = await this.prisma.task.create({
@@ -397,7 +395,7 @@ export class ScheduleEventsService {
       if (!dto.forceCreate) {
         const conflictResult = await this.checkConflicts(userId, newStart, newEnd, master.id);
         if (conflictResult.hasConflict) {
-          throw new ConflictException({ message: 'SCHEDULE_CONFLICT', conflicts: conflictResult.conflicts });
+          throw new ConflictException(this.conflictErrorBody(conflictResult.conflicts));
         }
       }
 
@@ -500,7 +498,7 @@ export class ScheduleEventsService {
     if (newEnd <= newStart) throw new BadRequestException('endAt must be after startAt');
 
     const splitPoint = new Date(occurrenceStart.getTime() - 1000);
-    const newRecurrenceRule = this.deriveFollowingSeriesRule(master.recurrenceRule, master.recurrenceEndAt, splitPoint);
+    const newRecurrenceRule = this.deriveFollowingSeriesRule(master, splitPoint);
     const newRecurrenceEndAt = master.recurrenceEndAt && master.recurrenceEndAt > splitPoint ? master.recurrenceEndAt : null;
 
     const newMaster = await this.prisma.$transaction(async (tx) => {
@@ -571,7 +569,7 @@ export class ScheduleEventsService {
         if (!dto.forceCreate) {
           const conflictResult = await this.checkConflicts(userId, newStart, newEnd, master.id);
           if (conflictResult.hasConflict) {
-            throw new ConflictException({ message: 'SCHEDULE_CONFLICT', conflicts: conflictResult.conflicts });
+            throw new ConflictException(this.conflictErrorBody(conflictResult.conflicts));
           }
         }
         newScheduledStart = newStart;
@@ -700,7 +698,7 @@ export class ScheduleEventsService {
     if (newEnd <= newStart) throw new BadRequestException('endAt must be after startAt');
 
     const splitPoint = new Date(occurrenceStart.getTime() - 1000);
-    const newRecurrenceRule = this.deriveFollowingSeriesRule(master.recurrenceRule, master.recurrenceEndAt, splitPoint);
+    const newRecurrenceRule = this.deriveFollowingSeriesRule(master, splitPoint);
     const newRecurrenceEndAt = master.recurrenceEndAt && master.recurrenceEndAt > splitPoint ? master.recurrenceEndAt : null;
 
     const newMaster = await this.prisma.$transaction(async (tx) => {
@@ -1214,6 +1212,23 @@ export class ScheduleEventsService {
 
   // ─── Shared helpers ───────────────────────────────────────────────────────────
 
+  /**
+   * Nest's default exception filter only injects `statusCode`/`error` when the
+   * HttpException body is a string; passing a plain object (needed here to carry
+   * `conflicts`/`reason`/`suggestions`) is returned to the client as-is. Build the
+   * body explicitly so 409/422 responses from this module still match the standard
+   * `{ statusCode, message, error }` shape every other endpoint in the app returns,
+   * with `message` kept as the existing machine-readable code string the mobile
+   * client already switches on.
+   */
+  private conflictErrorBody(conflicts: ConflictItem[]) {
+    return { statusCode: 409, error: 'Conflict', message: 'SCHEDULE_CONFLICT', conflicts };
+  }
+
+  private noSlotErrorBody(reason: string, suggestions: string[]) {
+    return { statusCode: 422, error: 'Unprocessable Entity', message: 'NO_SLOT_AVAILABLE', reason, suggestions };
+  }
+
   private computeRecurrenceEndAt(recurrence?: { endType?: string; until?: string }): Date | null {
     if (!recurrence) return null;
     if (recurrence.endType === 'UNTIL' && recurrence.until) return new Date(recurrence.until);
@@ -1221,18 +1236,58 @@ export class ScheduleEventsService {
   }
 
   /**
-   * FOLLOWING-scope split simplification: reuses the old rule's FREQ/INTERVAL/BYDAY/BYMONTHDAY
-   * components, drops any old COUNT (exactly reducing a remaining COUNT across an arbitrary split
-   * point isn't reliably computable without re-deriving the exact occurrence index), and instead
-   * re-anchors the end bound to the old series' recurrenceEndAt (as UNTIL) if one existed, or
-   * leaves the new series open-ended (NEVER) otherwise. This never produces MORE occurrences than
-   * the original series would have had, and never duplicates/orphans data — it can only be
-   * more permissive than an exact COUNT reduction would be in rare edge cases.
+   * FOLLOWING-scope split: reuses the old rule's FREQ/INTERVAL/BYDAY/BYMONTHDAY components.
+   * For a COUNT-bounded original rule, the new series' COUNT is computed exactly — not
+   * approximated — by expanding the *original, untruncated* rule from its own dtstart up to
+   * (not including) the split point and subtracting that occurrence count from the original
+   * COUNT. This guarantees the new series has exactly as many remaining occurrences as the
+   * original series would have had from this point forward, with no manual recount possible
+   * for the user to get wrong. For a NEVER/UNTIL-bounded original rule, the new series re-anchors
+   * to the old recurrenceEndAt (as UNTIL) if one is still in the future relative to the split
+   * point, or stays open-ended otherwise — both exact, not approximations.
    */
-  private deriveFollowingSeriesRule(recurrenceRule: string | null, recurrenceEndAt: Date | null, splitPoint: Date): string | null {
-    if (!recurrenceRule) return null;
-    const parts = recurrenceRule.split(';').filter((p) => !p.startsWith('COUNT=') && !p.startsWith('UNTIL='));
-    const effectiveEnd = recurrenceEndAt && recurrenceEndAt > splitPoint ? recurrenceEndAt : null;
+  private deriveFollowingSeriesRule(
+    master: {
+      startTime?: Date | null;
+      endTime?: Date | null;
+      scheduledStart?: Date | null;
+      scheduledEnd?: Date | null;
+      recurrenceRule: string | null;
+      recurrenceTimezone?: string | null;
+      recurrenceEndAt: Date | null;
+    },
+    splitPoint: Date,
+  ): string | null {
+    if (!master.recurrenceRule) return null;
+
+    const countMatch = master.recurrenceRule.match(/COUNT=(\d+)/);
+    const parts = master.recurrenceRule.split(';').filter((p) => !p.startsWith('COUNT=') && !p.startsWith('UNTIL='));
+
+    if (countMatch) {
+      const originalCount = parseInt(countMatch[1], 10);
+      const seriesStart = master.startTime ?? master.scheduledStart;
+      const priorOccurrences = seriesStart
+        ? this.recurrence.expandOccurrences(
+            {
+              id: 'following-scope-count-lookahead',
+              startTime: master.startTime,
+              endTime: master.endTime,
+              scheduledStart: master.scheduledStart,
+              scheduledEnd: master.scheduledEnd,
+              recurrenceRule: master.recurrenceRule,
+              recurrenceTimezone: master.recurrenceTimezone,
+              recurrenceEndAt: null,
+            },
+            seriesStart,
+            splitPoint,
+          )
+        : [];
+      const remainingCount = Math.max(1, originalCount - priorOccurrences.length);
+      parts.push(`COUNT=${remainingCount}`);
+      return parts.join(';');
+    }
+
+    const effectiveEnd = master.recurrenceEndAt && master.recurrenceEndAt > splitPoint ? master.recurrenceEndAt : null;
     if (effectiveEnd) {
       const untilStr = DateTime.fromJSDate(effectiveEnd, { zone: 'utc' }).toFormat("yyyyMMdd'T'HHmmss'Z'");
       parts.push(`UNTIL=${untilStr}`);
