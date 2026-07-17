@@ -26,7 +26,7 @@ import { CreateExpenseDto } from './dto/create-expense.dto.js';
 import { UpdateExpenseDto } from './dto/update-expense.dto.js';
 import { CreateBudgetDto } from './dto/create-budget.dto.js';
 import { UpdateBudgetDto } from './dto/update-budget.dto.js';
-import { MonthYearQueryDto } from './dto/report-query.dto.js';
+import { MonthYearQueryDto, TrendQueryDto } from './dto/report-query.dto.js';
 
 @ApiTags('Finance')
 @ApiBearerAuth()
@@ -237,5 +237,11 @@ export class FinanceController {
   @ApiOperation({ summary: 'Cashflow forecast based on past 3 months' })
   getCashflowForecast(@CurrentUser() user: AuthUser) {
     return this.financeService.getCashflowForecast(user.userId);
+  }
+
+  @Get('monthly-trend')
+  @ApiOperation({ summary: 'Income/expense/savings series for the trailing N months (chart data)' })
+  getMonthlyTrend(@CurrentUser() user: AuthUser, @Query() query: TrendQueryDto) {
+    return this.financeService.getMonthlyTrend(user.userId, query.months ?? 6);
   }
 }

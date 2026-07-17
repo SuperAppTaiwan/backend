@@ -82,6 +82,12 @@ export class AIController {
     return this.aiService.analyzeBudget(user.userId);
   }
 
+  @Get('cashflow-forecast')
+  @ApiOperation({ summary: 'AI-backed cash flow forecast (deterministic fallback without an AI key)' })
+  getCashflowForecast(@CurrentUser() user: AuthUser) {
+    return this.aiService.getCashflowForecast(user.userId);
+  }
+
   @Post('optimize-schedule')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Get schedule optimization suggestions' })

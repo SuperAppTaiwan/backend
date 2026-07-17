@@ -267,6 +267,48 @@ describe('FinanceService', () => {
     });
   });
 
+  // ─── Monthly Trend ────────────────────────────────────────────────────────────
+
+  describe('getMonthlyTrend', () => {
+    it('buckets income/expense into the correct trailing month and computes net savings', async () => {
+      const now = new Date();
+      const thisMonth = makeDate(now.getFullYear(), now.getMonth() + 1, 10);
+      const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 10);
+      const lastMonth = makeDate(lastMonthDate.getFullYear(), lastMonthDate.getMonth() + 1, 10);
+
+      mockPrisma.income.findMany.mockResolvedValue([
+        { amount: dec(20000), receivedDate: thisMonth },
+        { amount: dec(10000), receivedDate: lastMonth },
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([
+        { amount: dec(5000), expenseDate: thisMonth },
+        { amount: dec(4000), expenseDate: lastMonth },
+      ]);
+
+      const result = await service.getMonthlyTrend('u-1', 3);
+
+      expect(result).toHaveLength(3);
+      const current = result[result.length - 1];
+      const previous = result[result.length - 2];
+      expect(current.totalIncome).toBe(20000);
+      expect(current.totalExpense).toBe(5000);
+      expect(current.netSavings).toBe(15000);
+      expect(previous.totalIncome).toBe(10000);
+      expect(previous.totalExpense).toBe(4000);
+      expect(previous.netSavings).toBe(6000);
+    });
+
+    it('returns a zeroed bucket per month when there is no data', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([]);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+
+      const result = await service.getMonthlyTrend('u-1', 6);
+
+      expect(result).toHaveLength(6);
+      expect(result.every((r) => r.totalIncome === 0 && r.totalExpense === 0 && r.netSavings === 0)).toBe(true);
+    });
+  });
+
   // ─── Ownership enforcement ────────────────────────────────────────────────────
 
   describe('ownership enforcement', () => {

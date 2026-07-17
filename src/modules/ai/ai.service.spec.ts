@@ -247,4 +247,65 @@ describe('AIService', () => {
     await service.generateRecommendations(USER_ID);
     expect(prisma.recommendationLog.create).toHaveBeenCalled();
   });
+
+  // ─── Cashflow Forecast ────────────────────────────────────────────────────────
+
+  describe('getCashflowForecast', () => {
+    const now = new Date();
+    // Months strictly before the current one, matching the service's [now-6, now) window.
+    const monthDate = (offsetFromNow: number, day = 10) => new Date(now.getFullYear(), now.getMonth() + offsetFromNow, day);
+
+    it('falls back to deterministic narrative/recommendations when no AI provider is available', async () => {
+      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '30000' }, receivedDate: monthDate(o) }));
+      const expenses = [-1, -2, -3, -4, -5, -6].flatMap((o) => [
+        { amount: { toString: () => '10000' }, expenseDate: monthDate(o), category: { name: 'Ăn uống' } },
+        { amount: { toString: () => '5000' }, expenseDate: monthDate(o), category: { name: 'Di chuyển' } },
+      ]);
+      (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+
+      expect(result.provider).toBe('deterministic');
+      expect(result.averageMonthlyIncome).toBe(30000);
+      expect(result.averageMonthlyExpense).toBe(15000);
+      expect(result.projectedMonthlySavings).toBe(15000);
+      expect(result.riskLevel).toBe('LOW');
+      expect(result.trend).toBe('STABLE');
+      expect(result.biggestCategory).toEqual({ name: 'Ăn uống', amount: 60000, percent: 67 });
+      expect(result.recommendations.some((r) => r.includes('Ăn uống'))).toBe(true);
+      expect(result.narrative.length).toBeGreaterThan(0);
+    });
+
+    it('flags HIGH risk when average expenses exceed average income', async () => {
+      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '10000' }, receivedDate: monthDate(o) }));
+      const expenses = [-1, -2, -3, -4, -5, -6].map((o) => ({
+        amount: { toString: () => '15000' },
+        expenseDate: monthDate(o),
+        category: null,
+      }));
+      (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+
+      expect(result.riskLevel).toBe('HIGH');
+      expect(result.projectedMonthlySavings).toBeLessThan(0);
+      expect(result.recommendations.some((r) => r.includes('vượt thu nhập'))).toBe(true);
+    });
+
+    it('returns a no-data narrative and skips the AI call when there is no history', async () => {
+      (prisma.income.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+
+      expect(result.provider).toBe('deterministic');
+      expect(result.biggestCategory).toBeNull();
+      expect(result.narrative).toContain('Chưa có đủ dữ liệu');
+    });
+  });
 });

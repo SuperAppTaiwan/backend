@@ -480,6 +480,36 @@ export class FinanceService {
     };
   }
 
+  /** Per-month income/expense/savings series for the trailing `months`, for trend charts. */
+  async getMonthlyTrend(userId: string, months: number) {
+    const now = new Date();
+    const windowStart = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+    const windowEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    const [incomes, expenses] = await Promise.all([
+      this.prisma.income.findMany({ where: { userId, receivedDate: { gte: windowStart, lt: windowEnd } } }),
+      this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: windowStart, lt: windowEnd } } }),
+    ]);
+
+    const buckets: { month: number; year: number; totalIncome: number; totalExpense: number }[] = [];
+    for (let i = months - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      buckets.push({ month: d.getMonth() + 1, year: d.getFullYear(), totalIncome: 0, totalExpense: 0 });
+    }
+    const findBucket = (d: Date) => buckets.find((b) => b.month === d.getMonth() + 1 && b.year === d.getFullYear());
+
+    for (const inc of incomes) {
+      const bucket = findBucket(inc.receivedDate);
+      if (bucket) bucket.totalIncome += toNum(inc.amount);
+    }
+    for (const exp of expenses) {
+      const bucket = findBucket(exp.expenseDate);
+      if (bucket) bucket.totalExpense += toNum(exp.amount);
+    }
+
+    return buckets.map((b) => ({ ...b, netSavings: b.totalIncome - b.totalExpense }));
+  }
+
   async getCashflowForecast(userId: string) {
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);

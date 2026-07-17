@@ -525,6 +525,223 @@ export class AIService {
     return { totalExpense, budgetAmount, usedPercent: budgetAmount > 0 ? Math.round(totalExpense / budgetAmount * 100) : 0, suggestions, provider: 'deterministic' };
   }
 
+  // ─── Cashflow Forecast (AI-backed, deterministic fallback) ───────────────────
+
+  async getCashflowForecast(userId: string) {
+    const MONTHS = 6;
+    const now = new Date();
+    const windowStart = new Date(now.getFullYear(), now.getMonth() - MONTHS, 1);
+    const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const [incomes, expenses, budgets] = await Promise.all([
+      this.prisma.income.findMany({ where: { userId, receivedDate: { gte: windowStart, lt: thisMonthStart } } }),
+      this.prisma.expense.findMany({
+        where: { userId, expenseDate: { gte: windowStart, lt: thisMonthStart } },
+        include: { category: true },
+      }),
+      this.prisma.budget.findMany({ where: { userId }, orderBy: [{ year: 'desc' }, { month: 'desc' }], take: 1 }),
+    ]);
+
+    const toAmount = (v: { toString(): string }) => parseFloat(v.toString());
+    const monthKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}`;
+
+    // Oldest-to-newest per-month buckets over the window, used for trend detection —
+    // a single 6-month average can't tell "improving" from "declining", a month-by-month
+    // series can.
+    const monthBuckets = new Map<string, { income: number; expense: number }>();
+    for (let i = MONTHS - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - 1 - i, 1);
+      monthBuckets.set(monthKey(d), { income: 0, expense: 0 });
+    }
+    for (const inc of incomes) {
+      const bucket = monthBuckets.get(monthKey(inc.receivedDate));
+      if (bucket) bucket.income += toAmount(inc.amount);
+    }
+    for (const exp of expenses) {
+      const bucket = monthBuckets.get(monthKey(exp.expenseDate));
+      if (bucket) bucket.expense += toAmount(exp.amount);
+    }
+
+    const monthlySeries = [...monthBuckets.values()];
+    const hasAnyData = monthlySeries.some((m) => m.income > 0 || m.expense > 0);
+
+    const totalIncome = monthlySeries.reduce((s, m) => s + m.income, 0);
+    const totalExpense = monthlySeries.reduce((s, m) => s + m.expense, 0);
+    const avgMonthlyIncome = totalIncome / MONTHS;
+    const avgMonthlyExpense = totalExpense / MONTHS;
+    const projectedMonthlySavings = avgMonthlyIncome - avgMonthlyExpense;
+    const projectedSavingsAfter6Months = Math.round(projectedMonthlySavings * 6);
+
+    // Trend: most recent 3 months' net savings vs. the prior 3 months'.
+    const earlierNet = monthlySeries.slice(0, 3).reduce((s, m) => s + (m.income - m.expense), 0);
+    const recentNet = monthlySeries.slice(3).reduce((s, m) => s + (m.income - m.expense), 0);
+    let trend: 'IMPROVING' | 'STABLE' | 'DECLINING' = 'STABLE';
+    const trendThreshold = Math.abs(earlierNet) * 0.1 + 100;
+    if (recentNet - earlierNet > trendThreshold) trend = 'IMPROVING';
+    else if (earlierNet - recentNet > trendThreshold) trend = 'DECLINING';
+
+    // Biggest spending category over the window, for a concrete "you spend X% on Y" insight.
+    const categoryTotals = new Map<string, number>();
+    const monthsSeenByCategory = new Map<string, Set<string>>();
+    for (const exp of expenses) {
+      const name = exp.category?.name ?? 'Khác';
+      categoryTotals.set(name, (categoryTotals.get(name) ?? 0) + toAmount(exp.amount));
+      if (!monthsSeenByCategory.has(name)) monthsSeenByCategory.set(name, new Set());
+      monthsSeenByCategory.get(name)!.add(monthKey(exp.expenseDate));
+    }
+    const biggestCategoryEntry = [...categoryTotals.entries()].sort((a, b) => b[1] - a[1])[0];
+    const biggestCategory =
+      biggestCategoryEntry && totalExpense > 0
+        ? {
+            name: biggestCategoryEntry[0],
+            amount: Math.round(biggestCategoryEntry[1]),
+            percent: Math.round((biggestCategoryEntry[1] / totalExpense) * 100),
+          }
+        : null;
+
+    // No recurrence field exists on Income/Expense yet — approximate "recurring" spending
+    // as a category that shows up in most months of the window, rather than adding new
+    // schema (out of scope here; a real recurrence model is a separate feature).
+    const recurringCategories = [...monthsSeenByCategory.entries()]
+      .filter(([, months]) => months.size >= Math.max(2, MONTHS - 2))
+      .map(([name, months]) => ({ name, monthsSeen: months.size }));
+
+    const budget = budgets[0] ?? null;
+    const currency = budget?.currency ?? incomes[0]?.currency ?? expenses[0]?.currency ?? 'VND';
+
+    let riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
+    if (projectedMonthlySavings <= 0) riskLevel = 'HIGH';
+    else if (avgMonthlyIncome > 0 && projectedMonthlySavings / avgMonthlyIncome < 0.1) riskLevel = 'MEDIUM';
+
+    // Deterministic narrative/recommendations computed from hard numbers — this is what
+    // ships when there's no AI key, and also what the AI response is validated against
+    // (the AI only ever supplies the qualitative writeup, never the numbers themselves).
+    const reduceCategoryMonthlyAmount = biggestCategory
+      ? Math.round((biggestCategory.amount / MONTHS) * 0.15)
+      : 0;
+    const deterministicRecommendations: string[] = [];
+    if (!budget) {
+      deterministicRecommendations.push('Tạo ngân sách tháng để nhận phân tích và cảnh báo chính xác hơn.');
+    }
+    if (biggestCategory) {
+      deterministicRecommendations.push(`Bạn chi ${biggestCategory.percent}% tổng chi tiêu cho ${biggestCategory.name}.`);
+      if (reduceCategoryMonthlyAmount > 0) {
+        deterministicRecommendations.push(
+          `Nếu giảm chi cho ${biggestCategory.name} 15%, bạn có thể tiết kiệm thêm khoảng ${reduceCategoryMonthlyAmount.toLocaleString('vi-VN')} ${currency}/tháng.`,
+        );
+      }
+    }
+    if (riskLevel === 'HIGH') {
+      deterministicRecommendations.push('Chi tiêu trung bình đang vượt thu nhập — hãy rà soát các khoản chi chưa cần thiết ngay.');
+    } else if (budget) {
+      const budgetLimit = toAmount(budget.totalLimit);
+      if (budgetLimit > 0 && avgMonthlyExpense / budgetLimit > 0.9) {
+        deterministicRecommendations.push('Bạn có khả năng vượt ngân sách tháng nếu duy trì tốc độ chi tiêu hiện tại.');
+      }
+    }
+
+    const deterministicNarrative = !hasAnyData
+      ? 'Chưa có đủ dữ liệu thu chi trong 6 tháng qua để đưa ra dự báo. Hãy ghi lại thu nhập và chi tiêu để nhận phân tích chi tiết hơn.'
+      : trend === 'IMPROVING'
+        ? `Tình hình tài chính đang cải thiện: tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng trong 3 tháng gần đây, cao hơn giai đoạn trước.`
+        : trend === 'DECLINING'
+          ? `Tiết kiệm đang giảm dần so với 3 tháng trước — nên rà soát lại các khoản chi lớn hoặc không đều đặn.`
+          : `Tình hình tài chính khá ổn định, tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng.`;
+
+    let narrative = deterministicNarrative;
+    let recommendations = deterministicRecommendations;
+    let provider = 'deterministic';
+
+    if (hasAnyData) {
+      try {
+        const prompt = this.buildCashflowForecastPrompt({
+          avgMonthlyIncome: Math.round(avgMonthlyIncome),
+          avgMonthlyExpense: Math.round(avgMonthlyExpense),
+          projectedMonthlySavings: Math.round(projectedMonthlySavings),
+          projectedSavingsAfter6Months,
+          trend,
+          riskLevel,
+          biggestCategory,
+          recurringCategories,
+          currency,
+          hasBudget: !!budget,
+        });
+        const text = await this.chain.generateText(prompt);
+        const parsed = text ? this.parseCashflowAiResponse(text) : null;
+        if (parsed) {
+          narrative = parsed.narrative || narrative;
+          if (parsed.recommendations.length > 0) recommendations = parsed.recommendations;
+          provider = 'ai';
+        }
+      } catch (err) {
+        this.logger.warn('AI cashflow forecast failed, using deterministic fallback', err as Error);
+      }
+    }
+
+    return {
+      basedOnMonths: MONTHS,
+      currency,
+      averageMonthlyIncome: Math.round(avgMonthlyIncome),
+      averageMonthlyExpense: Math.round(avgMonthlyExpense),
+      projectedMonthlySavings: Math.round(projectedMonthlySavings),
+      projectedSavingsAfter6Months,
+      trend,
+      riskLevel,
+      biggestCategory,
+      recurringCategories,
+      narrative,
+      recommendations,
+      provider,
+    };
+  }
+
+  private buildCashflowForecastPrompt(data: {
+    avgMonthlyIncome: number;
+    avgMonthlyExpense: number;
+    projectedMonthlySavings: number;
+    projectedSavingsAfter6Months: number;
+    trend: string;
+    riskLevel: string;
+    biggestCategory: { name: string; amount: number; percent: number } | null;
+    recurringCategories: { name: string; monthsSeen: number }[];
+    currency: string;
+    hasBudget: boolean;
+  }): string {
+    return [
+      'Bạn là một cố vấn tài chính cá nhân cho người Việt đang sinh sống tại Đài Loan.',
+      `Dữ liệu 6 tháng gần đây của người dùng (đơn vị tiền tệ: ${data.currency}):`,
+      `- Thu nhập trung bình/tháng: ${data.avgMonthlyIncome.toLocaleString('vi-VN')}`,
+      `- Chi tiêu trung bình/tháng: ${data.avgMonthlyExpense.toLocaleString('vi-VN')}`,
+      `- Tiết kiệm dự kiến/tháng: ${data.projectedMonthlySavings.toLocaleString('vi-VN')}`,
+      `- Tiết kiệm dự kiến sau 6 tháng: ${data.projectedSavingsAfter6Months.toLocaleString('vi-VN')}`,
+      `- Xu hướng dòng tiền: ${data.trend}`,
+      `- Mức rủi ro: ${data.riskLevel}`,
+      `- Danh mục chi tiêu lớn nhất: ${data.biggestCategory ? `${data.biggestCategory.name} (${data.biggestCategory.percent}% tổng chi tiêu)` : 'không có dữ liệu'}`,
+      `- Danh mục chi tiêu đều đặn hàng tháng: ${data.recurringCategories.map((c) => c.name).join(', ') || 'không có'}`,
+      `- Đã thiết lập ngân sách tháng: ${data.hasBudget ? 'có' : 'chưa'}`,
+      '',
+      'Chỉ trả lời bằng JSON hợp lệ theo đúng định dạng sau, không thêm bất kỳ văn bản nào khác trước hoặc sau JSON:',
+      '{"narrative": "1-2 câu nhận xét ngắn gọn, cụ thể về tình hình tài chính", "recommendations": ["gợi ý 1", "gợi ý 2", "gợi ý 3"]}',
+      '',
+      'Yêu cầu: mỗi gợi ý phải cụ thể, dựa trên số liệu đã cho ở trên (không bịa số liệu mới), bằng tiếng Việt, tối đa 30 từ mỗi gợi ý, tối đa 4 gợi ý.',
+    ].join('\n');
+  }
+
+  private parseCashflowAiResponse(text: string): { narrative: string; recommendations: string[] } | null {
+    try {
+      const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (!match) return null;
+      const obj = JSON.parse(match[0]) as { narrative?: unknown; recommendations?: unknown };
+      if (typeof obj.narrative !== 'string' || !Array.isArray(obj.recommendations)) return null;
+      const recommendations = obj.recommendations.filter((r): r is string => typeof r === 'string');
+      if (!obj.narrative.trim() || recommendations.length === 0) return null;
+      return { narrative: obj.narrative, recommendations };
+    } catch {
+      return null;
+    }
+  }
+
   async optimizeSchedule(userId: string) {
     const tasks = await this.prisma.task.findMany({ where: { userId, status: { in: ['TODO', 'OVERDUE', 'IN_PROGRESS'] } }, take: 20 });
     const overdue = tasks.filter((t) => t.status === 'OVERDUE');
