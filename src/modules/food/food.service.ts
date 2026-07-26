@@ -191,7 +191,7 @@ export class FoodService {
           data: {
             userId,
             categoryId: foodCategory?.id ?? null,
-            amount: new Prisma.Decimal(dto.cost),
+            amount: dto.cost,
             currency: 'TWD',
             expenseDate: new Date(),
             paymentMethod: PaymentMethod.CASH,
@@ -245,9 +245,9 @@ export class FoodService {
         category: dto.category,
         ingredientsJson: (dto.ingredientsJson as unknown) as Prisma.InputJsonValue,
         stepsJson: (dto.stepsJson as unknown) as Prisma.InputJsonValue,
-        tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
+        tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : null,
+        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : null,
+        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : null,
         imageUrl: dto.imageUrl,
         source: dto.source,
       },
@@ -491,10 +491,9 @@ export class FoodService {
         data: itemsToCreate.map((i) => ({
           shoppingListId: id,
           ingredientName: i.ingredientName,
-          quantity: new Prisma.Decimal(i.quantity),
+          quantity: i.quantity,
           unit: (i.unit as Parameters<typeof this.prisma.shoppingListItem.create>[0]['data']['unit']) ?? 'PIECE',
         })),
-        skipDuplicates: true,
       });
     }
 
@@ -542,7 +541,7 @@ export class FoodService {
       data: {
         shoppingListId: listId,
         ingredientName: dto.ingredientName,
-        quantity: new Prisma.Decimal(dto.quantity ?? 1),
+        quantity: dto.quantity ?? 1,
         unit: (dto.unit as Parameters<typeof this.prisma.shoppingListItem.create>[0]['data']['unit']) ?? 'PIECE',
         notes: dto.notes,
       },
@@ -1089,9 +1088,9 @@ Return ONE JSON object — no markdown, no explanation:
         category: dto.category ?? 'OTHER',
         ingredientsJson: ((dto.ingredientsJson ?? []) as unknown) as Prisma.InputJsonValue,
         stepsJson: ((dto.stepsJson ?? []) as unknown) as Prisma.InputJsonValue,
-        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        tagsJson: Prisma.JsonNull,
+        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : null,
+        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : null,
+        tagsJson: null,
       },
     });
 

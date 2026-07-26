@@ -17,7 +17,7 @@ class EnvironmentVariables {
   API_PORT: number = 3000;
 
   @IsString()
-  DATABASE_URL: string = '';
+  MONGODB_URL: string = '';
 
   @IsString()
   @IsOptional()

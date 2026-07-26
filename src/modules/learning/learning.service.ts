@@ -81,7 +81,6 @@ export class LearningService {
     if (count > 0) return;
     await this.prisma.vocabulary.createMany({
       data: DEFAULT_VOCAB.map((v) => ({ ...v, source: 'system' })),
-      skipDuplicates: true,
     });
   }
 
