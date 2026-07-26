@@ -110,6 +110,8 @@ export class ScheduleService {
         priority: dto.priority ?? 'MEDIUM',
         deadline: dto.deadline ? new Date(dto.deadline) : null,
         estimatedMinutes: dto.estimatedMinutes,
+        scheduledStart: null,
+        scheduledEnd: null,
         sourceModule: dto.sourceModule ?? 'manual',
         sourceEntityId: dto.sourceEntityId,
       },
