@@ -6,6 +6,7 @@ import * as bcrypt from 'bcryptjs';
 import { EventsService } from '../events/events.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { AuthService } from './auth.service.js';
+import { AllergySeverity, HealthConditionStatus } from '../profile/dto/health-profile.dto.js';
 
 const mockUser = {
   id: 'user-1',
@@ -108,6 +109,55 @@ describe('AuthService', () => {
       expect(mockPrisma.user.findUnique).toHaveBeenCalledWith({
         where: { email: 'test@example.com' },
       });
+    });
+
+    it('should register successfully with full health information and persist it on the nested profile create', async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue(mockUser);
+      mockPrisma.refreshToken.create.mockResolvedValue({ id: 'rt-1' });
+
+      await service.register({
+        email: 'test@example.com',
+        password: 'password123',
+        displayName: 'Test User',
+        weightKg: 65,
+        heightCm: 172,
+        allergies: [{ name: 'Đậu phộng', severity: AllergySeverity.SEVERE }, { name: 'đậu phộng' }], // dup, case-insensitive
+        healthConditions: [{ name: 'Tiểu đường', status: HealthConditionStatus.ACTIVE }],
+        medications: [{ name: 'Metformin', dosage: '500mg' }],
+      });
+
+      expect(mockPrisma.user.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            profile: expect.objectContaining({
+              create: expect.objectContaining({
+                weightKg: 65,
+                heightCm: 172,
+                allergies: [{ name: 'Đậu phộng', severity: 'severe' }], // deduplicated
+                healthConditions: [{ name: 'Tiểu đường', status: 'active' }],
+                medications: [{ name: 'Metformin', dosage: '500mg' }],
+              }),
+            }),
+          }),
+        }),
+      );
+    });
+
+    it('should register successfully without any health information (backward compatible)', async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue(mockUser);
+      mockPrisma.refreshToken.create.mockResolvedValue({ id: 'rt-1' });
+
+      const result = await service.register({
+        email: 'test@example.com',
+        password: 'password123',
+        displayName: 'Test User',
+      });
+
+      expect(result.user.email).toBe('test@example.com');
+      const createCall = mockPrisma.user.create.mock.calls[0][0];
+      expect(createCall.data.profile.create).toEqual({});
     });
   });
 

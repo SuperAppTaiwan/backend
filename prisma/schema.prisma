@@ -297,18 +297,32 @@ model User {
 }
 
 model UserProfile {
-  id                   String   @id @default(cuid()) @map("_id")
-  userId               String   @unique @map("user_id")
-  locationCity         String?  @map("location_city")
-  timezone             String   @default("Asia/Taipei")
-  currency             String   @default("TWD")
-  monthlyBudget        Float?   @map("monthly_budget")
-  chineseLevel         String?  @map("chinese_level")
-  dietPreference       String?  @map("diet_preference")
-  livingStatus         String?  @map("living_status")
-  familySupportMonthly Float?   @map("family_support_monthly")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  id                   String  @id @default(cuid()) @map("_id")
+  userId               String  @unique @map("user_id")
+  locationCity         String? @map("location_city")
+  timezone             String  @default("Asia/Taipei")
+  currency             String  @default("TWD")
+  monthlyBudget        Float?  @map("monthly_budget")
+  chineseLevel         String? @map("chinese_level")
+  dietPreference       String? @map("diet_preference")
+  livingStatus         String? @map("living_status")
+  familySupportMonthly Float?  @map("family_support_monthly")
+
+  // ─── Health profile ─────────────────────────────────────────────────────────
+  // weightKg/heightCm are the only stored measurements; BMI is always derived
+  // from them at read time (see UserHealthContextService) rather than persisted,
+  // so it can never drift out of sync with the source values.
+  weightKg         Float? @map("weight_kg")
+  heightCm         Float? @map("height_cm")
+  // Each stored as a JSON array of structured records — see HealthProfileTypes
+  // in user-health-context.service.ts for the shape. Validated at the API
+  // boundary by class-validator DTOs before being persisted here.
+  allergies        Json?  @map("allergies")
+  healthConditions Json?  @map("health_conditions")
+  medications      Json?  @map("medications")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
