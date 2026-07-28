@@ -504,6 +504,12 @@ export class GenerateRecipesDto {
   @IsInt()
   @Min(1)
   declare expiryPriorityDays?: number;
+
+  @ApiPropertyOptional({ type: [String], description: 'Additional ingredients/dishes to exclude beyond the user\'s saved allergies' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare excludedIngredients?: string[];
 }
 
 export class SuggestMealDto {
@@ -523,6 +529,12 @@ export class SuggestMealDto {
   @IsArray()
   @IsString({ each: true })
   declare excludeMeals?: string[];
+
+  @ApiPropertyOptional({ type: [String], description: 'Additional ingredients/dishes to exclude beyond the user\'s saved allergies' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  declare excludedIngredients?: string[];
 }
 
 export class AcceptMealSuggestionDto {

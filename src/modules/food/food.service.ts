@@ -1,9 +1,11 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ExpenseCategoryType, FoodCategory, PaymentMethod, Prisma, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
+import { UserHealthContextService } from '../profile/user-health-context.service.js';
+import { buildHealthAwareRecipePrompt, buildHealthAwareMealPrompt } from './prompts/health-aware-prompt.builder.js';
 
 const RECIPE_CATEGORY_IMAGES: Record<string, string> = {
   VEGETABLE: 'https://images.unsplash.com/photo-1512621776951-a57ef8c7f0cc?w=400&h=300&fit=crop&auto=format&q=80',
@@ -76,6 +78,7 @@ export class FoodService {
     private readonly events: EventsService,
     private readonly aiChain: AIProviderChain,
     private readonly config: ConfigService,
+    private readonly healthContext: UserHealthContextService,
   ) {}
 
   private safeJson<T>(text: string, fallback: T): T {
@@ -251,7 +254,7 @@ export class FoodService {
           data: {
             userId,
             categoryId: foodCategory?.id ?? null,
-            amount: new Prisma.Decimal(dto.cost),
+            amount: dto.cost,
             currency: 'TWD',
             expenseDate: new Date(),
             paymentMethod: PaymentMethod.CASH,
@@ -342,9 +345,9 @@ export class FoodService {
         category: dto.category,
         ingredientsJson: (dto.ingredientsJson as unknown) as Prisma.InputJsonValue,
         stepsJson: (dto.stepsJson as unknown) as Prisma.InputJsonValue,
-        tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
+        tagsJson: dto.tagsJson ? ((dto.tagsJson as unknown) as Prisma.InputJsonValue) : null,
+        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : null,
+        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : null,
         imageUrl: dto.imageUrl,
         source: dto.source,
       },
@@ -790,10 +793,9 @@ Write ONE short, friendly Vietnamese sentence of practical advice (max 40 words)
         data: itemsToCreate.map((i) => ({
           shoppingListId: id,
           ingredientName: i.ingredientName,
-          quantity: new Prisma.Decimal(i.quantity),
+          quantity: i.quantity,
           unit: (i.unit as Parameters<typeof this.prisma.shoppingListItem.create>[0]['data']['unit']) ?? 'PIECE',
         })),
-        skipDuplicates: true,
       });
     }
 
@@ -841,7 +843,7 @@ Write ONE short, friendly Vietnamese sentence of practical advice (max 40 words)
       data: {
         shoppingListId: listId,
         ingredientName: dto.ingredientName,
-        quantity: new Prisma.Decimal(dto.quantity ?? 1),
+        quantity: dto.quantity ?? 1,
         unit: (dto.unit as Parameters<typeof this.prisma.shoppingListItem.create>[0]['data']['unit']) ?? 'PIECE',
         notes: dto.notes,
       },
@@ -999,37 +1001,7 @@ If the image is NOT food-related (e.g. a person, furniture, random object), set 
 
   // ─── AI: Recipe Generation ────────────────────────────────────────────────
 
-  async generateRecipes(userId: string, dto: GenerateRecipesDto) {
-    const expiryDays = dto.expiryPriorityDays ?? 7;
-    const count = Math.min(dto.count ?? 3, 5);
-
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() + expiryDays);
-
-    const [allIngredients, expiringIngredients] = await Promise.all([
-      this.prisma.ingredient.findMany({
-        where: { userId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], quantity: { gt: 0 } },
-        orderBy: [{ expiresAt: 'asc' }],
-        take: 30,
-      }),
-      this.prisma.ingredient.findMany({
-        where: { userId, expiresAt: { not: null, lte: cutoff }, quantity: { gt: 0 } },
-        orderBy: { expiresAt: 'asc' },
-      }),
-    ]);
-
-    const ingredientList = allIngredients.map((i) => ({
-      name: i.name,
-      category: i.category,
-      quantity: parseFloat(i.quantity.toString()),
-      unit: i.unit,
-      expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null,
-      isExpiringSoon: expiringIngredients.some((e) => e.id === i.id),
-    }));
-
-    const hasInventory = ingredientList.length > 0;
-
-    const responseSchema = `[
+  private static readonly RECIPE_RESPONSE_SCHEMA = `[
   {
     "title": string,           // Vietnamese dish name (also add English in parentheses)
     "description": string,     // 1-2 sentence description in Vietnamese
@@ -1048,63 +1020,149 @@ If the image is NOT food-related (e.g. a person, furniture, random object), set 
       "calories": number,      // per serving estimate
       "protein": string,
       "carbs": string,
-      "fat": string
+      "fat": string,
+      "sodiumMg": number,
+      "sugarG": number,
+      "fiberG": number
     },
     "aiReason": string,        // why this recipe is a good fit (Vietnamese)
-    "tagsJson": [string]
+    "tagsJson": [string],
+    "healthSuitability": {
+      "matchedConditions": [string],   // which of the user's health conditions this recipe suits, if any
+      "avoidedAllergens": [string],    // which of the user's allergies this recipe deliberately avoids
+      "warnings": [string],            // e.g. "Kiểm tra nhãn nước mắm/gia vị đóng gói có thể chứa dị ứng ẩn"
+      "explanation": string            // short Vietnamese explanation of the health reasoning
+    }
   }
 ]`;
 
-    const prompt = hasInventory
-      ? `You are a Vietnamese home cooking AI assistant. Generate ${count} practical recipe suggestions that prioritize using the ingredients the user already has, to maximize ingredient usage and minimize food waste.
+  private static readonly RECIPE_SAFETY_DISCLAIMER =
+    'Gợi ý món ăn từ AI chỉ mang tính tham khảo để lên kế hoạch bữa ăn. Vui lòng kiểm tra nhãn thành phần, nguy cơ nhiễm chéo, dị ứng và tương tác thuốc với bác sĩ hoặc chuyên gia dinh dưỡng trước khi sử dụng.';
 
-Available ingredients:
-${JSON.stringify(ingredientList, null, 2)}
+  private static readonly SEVERE_ALLERGY_WARNING =
+    'Đã phát hiện dị ứng NẶNG trong hồ sơ của bạn. Luôn kiểm tra kỹ nhãn thành phần và nguy cơ nhiễm chéo trước khi chế biến hoặc dùng món này.';
 
-PRIORITY: Use ingredients marked as isExpiringSoon=true first. It's fine for a recipe to need a few extra ingredients the user doesn't have — list those honestly in missingIngredients rather than refusing to suggest the recipe.
+  private buildRecipeHealthMeta(userId: string) {
+    return Promise.all([
+      this.healthContext.buildAIHealthContext(userId),
+      this.prisma.userProfile.findUnique({ where: { userId }, select: { dietPreference: true } }),
+    ]);
+  }
 
-Return a JSON array of ${count} recipes:
-${responseSchema}
+  async generateRecipes(userId: string, dto: GenerateRecipesDto) {
+    const expiryDays = dto.expiryPriorityDays ?? 7;
+    const count = Math.min(dto.count ?? 3, 5);
 
-Rules:
-- Prioritize recipes that maximize use of the available ingredients above and minimize food waste
-- List any ingredient NOT in the available list in missingIngredients — suggesting a recipe with 1-2 extra items is fine
-- Use Vietnamese for descriptions and instructions
-- Keep instructions practical and specific
-- Prefer recipes using expiring ingredients`
-      : `You are a Vietnamese home cooking AI assistant. The user has no ingredients logged in their inventory yet. Generate ${count} popular, practical Vietnamese home-cooking recipes that most households can make with common pantry staples.
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() + expiryDays);
 
-Return a JSON array of ${count} recipes:
-${responseSchema}
+    const [allIngredients, expiringIngredients, [healthCtx, profile]] = await Promise.all([
+      this.prisma.ingredient.findMany({
+        where: { userId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], quantity: { gt: 0 } },
+        orderBy: [{ expiresAt: 'asc' }],
+        take: 30,
+      }),
+      this.prisma.ingredient.findMany({
+        where: { userId, expiresAt: { not: null, lte: cutoff }, quantity: { gt: 0 } },
+        orderBy: { expiresAt: 'asc' },
+      }),
+      this.buildRecipeHealthMeta(userId),
+    ]);
 
-Rules:
-- Suggest broadly popular, approachable Vietnamese dishes — these are general suggestions, not based on any specific inventory
-- List the realistic ingredients each dish needs in ingredientsJson, and also copy them into missingIngredients since the user has none logged
-- Use Vietnamese for descriptions and instructions
-- Keep instructions practical and specific`;
+    const forbiddenAllergens = this.healthContext.buildForbiddenAllergenList(healthCtx.allergies, dto.excludedIngredients ?? []);
+    const hasSevereAllergy = this.healthContext.hasSevereAllergy(healthCtx);
 
-    const raw = await this.aiChain.generateText(prompt);
+    // Pantry items matching a known allergen are excluded from the candidate
+    // list entirely — both what the AI is shown as "available" and what the
+    // deterministic fallback (used when the AI is unavailable/rate-limited)
+    // builds a dish name from. Post-generation validation alone isn't enough:
+    // the deterministic path doesn't go through the AI at all.
+    const ingredientList = allIngredients
+      .filter((i) => this.healthContext.findAllergenMatches(i.name, forbiddenAllergens).length === 0)
+      .map((i) => ({
+        name: i.name,
+        category: i.category,
+        quantity: parseFloat(i.quantity.toString()),
+        unit: i.unit,
+        expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null,
+        isExpiringSoon: expiringIngredients.some((e) => e.id === i.id),
+      }));
+
+    const hasInventory = ingredientList.length > 0;
     const ownedNames = ingredientList.map((i) => i.name);
 
     const finalize = (recipes: Record<string, unknown>[], isAiGenerated: boolean) =>
-      recipes.map((r) => ({
-        ...r,
-        isAiGenerated,
-        basedOnInventory: hasInventory,
-        imageUrl: RECIPE_CATEGORY_IMAGES[r.category as string] ?? RECIPE_CATEGORY_IMAGES['OTHER'],
-        matchRate: hasInventory ? this.calcMatchRate(r.ingredientsJson as { name: string }[], ownedNames) : undefined,
-      }));
+      recipes.map((r) => {
+        const suitability = (r.healthSuitability as Record<string, unknown>) ?? {};
+        const warnings = new Set<string>(Array.isArray(suitability.warnings) ? (suitability.warnings as string[]) : []);
+        warnings.add(FoodService.RECIPE_SAFETY_DISCLAIMER);
+        if (hasSevereAllergy) warnings.add(FoodService.SEVERE_ALLERGY_WARNING);
 
-    if (!raw) {
-      // Deterministic fallback (AI unavailable)
-      return finalize(this.deterministicRecipeSuggestions(ingredientList, count), false);
+        return {
+          ...r,
+          isAiGenerated,
+          basedOnInventory: hasInventory,
+          imageUrl: RECIPE_CATEGORY_IMAGES[r.category as string] ?? RECIPE_CATEGORY_IMAGES['OTHER'],
+          matchRate: hasInventory ? this.calcMatchRate(r.ingredientsJson as { name: string }[], ownedNames) : undefined,
+          healthSuitability: { matchedConditions: [], avoidedAllergens: [], explanation: '', ...suitability, warnings: [...warnings] },
+        };
+      });
+
+    const fallback = () => finalize(this.deterministicRecipeSuggestions(ingredientList, count), false);
+
+    // Deterministic allergen check + limited retry: the LLM prompt alone is
+    // not trusted to keep the user safe — every generated recipe is validated
+    // against the forbidden-allergen list after the fact, and a violation
+    // triggers one retry with an explicit correction notice before we give up
+    // and fail safely by dropping the unsafe recipes rather than showing them.
+    let recipes: Record<string, unknown>[] = [];
+    let correctionNotice: string | undefined;
+    const MAX_ATTEMPTS = 2;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const prompt = buildHealthAwareRecipePrompt({
+        userHealthContext: healthCtx,
+        dietPreference: profile?.dietPreference ?? null,
+        ingredientList,
+        hasInventory,
+        count,
+        forbiddenAllergens,
+        responseSchema: FoodService.RECIPE_RESPONSE_SCHEMA,
+        correctionNotice,
+      });
+
+      const raw = await this.aiChain.generateText(prompt);
+      if (!raw) return fallback();
+
+      const parsed = this.safeJson<Record<string, unknown>[]>(raw, []);
+      if (!Array.isArray(parsed) || parsed.length === 0) return fallback();
+
+      const violations = parsed
+        .map((r) => this.healthContext.checkRecipeForAllergens(
+          { title: r.title as string, description: r.description as string, ingredientsJson: r.ingredientsJson },
+          forbiddenAllergens,
+        ))
+        .filter((check) => !check.safe);
+
+      if (violations.length === 0) {
+        recipes = parsed;
+        break;
+      }
+
+      if (attempt === MAX_ATTEMPTS) {
+        // Fail safely: keep only the recipes that passed validation rather
+        // than silently returning unsafe ones.
+        recipes = parsed.filter((r) => this.healthContext.checkRecipeForAllergens(
+          { title: r.title as string, description: r.description as string, ingredientsJson: r.ingredientsJson },
+          forbiddenAllergens,
+        ).safe);
+        this.logger.warn(`Recipe generation: ${violations.length} unsafe recipe(s) dropped after ${MAX_ATTEMPTS} attempts for user ${userId}`);
+      } else {
+        correctionNotice = [...new Set(violations.flatMap((v) => v.matchedAllergens))].join(', ');
+      }
     }
 
-    const recipes = this.safeJson<Record<string, unknown>[]>(raw, []);
-    if (!Array.isArray(recipes) || recipes.length === 0) {
-      return finalize(this.deterministicRecipeSuggestions(ingredientList, count), false);
-    }
-
+    if (recipes.length === 0) return fallback();
     return finalize(recipes, true);
   }
 
@@ -1357,6 +1415,29 @@ Rules:
     ].join(' ');
   }
 
+  private static readonly MEAL_RESPONSE_SCHEMA = `{
+  "mealName": string,
+  "description": string,
+  "category": "VEGETABLE"|"FRUIT"|"MEAT"|"SEAFOOD"|"DAIRY"|"GRAIN"|"LEGUME"|"OTHER",
+  "servings": number,
+  "prepMinutes": number,
+  "cookMinutes": number,
+  "ingredientsJson": [{"name": string, "quantity": number, "unit": "GRAM"|"KG"|"ML"|"LITER"|"PIECE"|"TABLESPOON"|"TEASPOON"|"CUP"|"OTHER"}],
+  "ingredientsFromInventory": [string],
+  "missingIngredients": [string],
+  "stepsJson": [{"step": number, "description": string}],
+  "nutritionSummary": string,
+  "nutritionJson": {"calories": number, "protein": string, "carbs": string, "fat": string, "fiber": string, "sodiumMg": number, "sugarG": number},
+  "aiReason": string,
+  "estimatedCalories": number,
+  "healthSuitability": {
+    "matchedConditions": [string],
+    "avoidedAllergens": [string],
+    "warnings": [string],
+    "explanation": string
+  }
+}`;
+
   async suggestMeal(userId: string, dto: SuggestMealDto) {
     const planDateObj = new Date(dto.planDate);
     const weekStart = new Date(planDateObj);
@@ -1365,7 +1446,7 @@ Rules:
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekEnd.getDate() + 7);
 
-    const [ingredients, existingMeals, scheduleInfo] = await Promise.all([
+    const [ingredients, existingMeals, scheduleInfo, [healthCtx, profile]] = await Promise.all([
       this.prisma.ingredient.findMany({
         where: { userId, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }], quantity: { gt: 0 } },
         orderBy: [{ expiresAt: 'asc' }],
@@ -1377,9 +1458,19 @@ Rules:
         orderBy: { planDate: 'asc' },
       }),
       this.checkBusyDay(userId, dto.planDate),
+      this.buildRecipeHealthMeta(userId),
     ]);
 
-    const ingredientList = ingredients.map((i) => ({ name: i.name, category: i.category, expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null }));
+    const forbiddenAllergens = this.healthContext.buildForbiddenAllergenList(healthCtx.allergies, dto.excludedIngredients ?? []);
+    const hasSevereAllergy = this.healthContext.hasSevereAllergy(healthCtx);
+
+    // Exclude pantry items matching a known allergen before they can reach
+    // either the AI prompt or the deterministic fallback template — see the
+    // matching comment in generateRecipes for why this can't be caught by
+    // post-generation validation alone.
+    const ingredientList = ingredients
+      .filter((i) => this.healthContext.findAllergenMatches(i.name, forbiddenAllergens).length === 0)
+      .map((i) => ({ name: i.name, category: i.category, expiresAt: i.expiresAt?.toISOString().slice(0, 10) ?? null }));
 
     const slotMealNames = existingMeals
       .filter((m) => m.planDate.toISOString().slice(0, 10) === dto.planDate && m.mealType === dto.mealType)
@@ -1402,67 +1493,105 @@ Rules:
       ? `⚠️ BUSY DAY: User has ${Math.round(scheduleInfo.totalBusyMinutes)} min of scheduled activities. Suggest a QUICK meal where prepMinutes + cookMinutes ≤ 20 total.`
       : 'User has free time. Complex or elaborate recipes are fine.';
 
-    const prompt = `You are a Vietnamese nutritionist and chef AI. Suggest ONE ${mealTypeVi[dto.mealType] ?? dto.mealType} meal for ${dto.planDate}.
+    const fallback = () => ({
+      ...this.deterministicMealSuggestion(dto.mealType, ingredientList, normalizedHardExcluded, forbiddenAllergens),
+      isBusySlot: scheduleInfo.isBusy,
+      healthSuitability: {
+        matchedConditions: [],
+        avoidedAllergens: [],
+        explanation: '',
+        warnings: hasSevereAllergy
+          ? [FoodService.RECIPE_SAFETY_DISCLAIMER, FoodService.SEVERE_ALLERGY_WARNING]
+          : [FoodService.RECIPE_SAFETY_DISCLAIMER],
+      },
+    });
 
-MEAL TYPE RULES:
-${mealTypeConstraints}
+    // Same deterministic-validation-with-limited-retry pattern as generateRecipes.
+    let suggestion: Record<string, unknown> | undefined;
+    let correctionNotice: string | undefined;
+    const MAX_ATTEMPTS = 2;
 
-SCHEDULE:
-${busyLine}
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const prompt = buildHealthAwareMealPrompt({
+        userHealthContext: healthCtx,
+        dietPreference: profile?.dietPreference ?? null,
+        mealTypeLabel: mealTypeVi[dto.mealType] ?? dto.mealType,
+        planDate: dto.planDate,
+        mealTypeConstraints,
+        busyLine,
+        weeklyNutritionContext,
+        ingredientList,
+        hardExcluded,
+        weekMealNames,
+        forbiddenAllergens,
+        responseSchema: FoodService.MEAL_RESPONSE_SCHEMA,
+        correctionNotice,
+      });
 
-WEEKLY NUTRITION BALANCE:
-${weeklyNutritionContext}
+      const raw = await this.aiChain.generateText(prompt);
+      if (!raw) return fallback();
 
-AVAILABLE INGREDIENTS (prioritise expiring first):
-${JSON.stringify(ingredientList)}
+      const parsed = this.safeJson<Record<string, unknown>>(raw, {});
+      if (!parsed.mealName) return fallback();
 
-FORBIDDEN — already in this slot or rejected. MUST NOT appear in your suggestion:
-${hardExcluded.length ? hardExcluded.join(', ') : 'none'}
+      const returnedName = (parsed.mealName as string).trim().toLowerCase();
+      if (normalizedHardExcluded.includes(returnedName)) {
+        this.logger.warn(`AI returned forbidden meal "${parsed.mealName as string}", using deterministic fallback`);
+        return fallback();
+      }
 
-Other meals this week (try to avoid repeating):
-${weekMealNames.join(', ') || 'none'}
+      const check = this.healthContext.checkRecipeForAllergens(
+        { title: parsed.mealName as string, description: parsed.description as string, ingredientsJson: parsed.ingredientsJson },
+        forbiddenAllergens,
+      );
 
-Return ONE JSON object — no markdown, no explanation:
-{
-  "mealName": string,
-  "description": string,
-  "category": "VEGETABLE"|"FRUIT"|"MEAT"|"SEAFOOD"|"DAIRY"|"GRAIN"|"LEGUME"|"OTHER",
-  "servings": number,
-  "prepMinutes": number,
-  "cookMinutes": number,
-  "ingredientsJson": [{"name": string, "quantity": number, "unit": "GRAM"|"KG"|"ML"|"LITER"|"PIECE"|"TABLESPOON"|"TEASPOON"|"CUP"|"OTHER"}],
-  "ingredientsFromInventory": [string],
-  "missingIngredients": [string],
-  "stepsJson": [{"step": number, "description": string}],
-  "nutritionSummary": string,
-  "nutritionJson": {"calories": number, "protein": string, "carbs": string, "fat": string, "fiber": string},
-  "aiReason": string,
-  "estimatedCalories": number
-}`;
+      if (check.safe) {
+        suggestion = parsed;
+        break;
+      }
 
-    const raw = await this.aiChain.generateText(prompt);
-
-    if (!raw) {
-      return { ...this.deterministicMealSuggestion(dto.mealType, ingredientList, normalizedHardExcluded), isBusySlot: scheduleInfo.isBusy };
+      if (attempt === MAX_ATTEMPTS) {
+        this.logger.warn(`Meal suggestion unsafe after ${MAX_ATTEMPTS} attempts (matched: ${check.matchedAllergens.join(', ')}) for user ${userId} — using deterministic fallback`);
+        return fallback();
+      }
+      correctionNotice = check.matchedAllergens.join(', ');
     }
 
-    const suggestion = this.safeJson<Record<string, unknown>>(raw, {});
-    if (!suggestion.mealName) {
-      return { ...this.deterministicMealSuggestion(dto.mealType, ingredientList, normalizedHardExcluded), isBusySlot: scheduleInfo.isBusy };
-    }
+    if (!suggestion) return fallback();
 
-    const returnedName = (suggestion.mealName as string).trim().toLowerCase();
-    if (normalizedHardExcluded.includes(returnedName)) {
-      this.logger.warn(`AI returned forbidden meal "${suggestion.mealName as string}", using deterministic fallback`);
-      return { ...this.deterministicMealSuggestion(dto.mealType, ingredientList, normalizedHardExcluded), isBusySlot: scheduleInfo.isBusy };
-    }
+    const suitability = (suggestion.healthSuitability as Record<string, unknown>) ?? {};
+    const warnings = new Set<string>(Array.isArray(suitability.warnings) ? (suitability.warnings as string[]) : []);
+    warnings.add(FoodService.RECIPE_SAFETY_DISCLAIMER);
+    if (hasSevereAllergy) warnings.add(FoodService.SEVERE_ALLERGY_WARNING);
 
-    return { ...suggestion, isAiGenerated: true, planDate: dto.planDate, mealType: dto.mealType, isBusySlot: scheduleInfo.isBusy };
+    return {
+      ...suggestion,
+      healthSuitability: { matchedConditions: [], avoidedAllergens: [], explanation: '', ...suitability, warnings: [...warnings] },
+      isAiGenerated: true,
+      planDate: dto.planDate,
+      mealType: dto.mealType,
+      isBusySlot: scheduleInfo.isBusy,
+    };
   }
 
   // ─── AI: Accept suggestion — atomically save Recipe + MealPlan ────────────
 
   async acceptMealSuggestion(userId: string, dto: AcceptMealSuggestionDto) {
+    // Defense in depth: the meal was already validated when suggested, but
+    // this endpoint accepts client-supplied fields directly, so re-check
+    // against the user's current allergies before persisting anything.
+    const healthCtx = await this.healthContext.buildAIHealthContext(userId);
+    const forbiddenAllergens = this.healthContext.buildForbiddenAllergenList(healthCtx.allergies);
+    const safetyCheck = this.healthContext.checkRecipeForAllergens(
+      { title: dto.mealName, description: dto.description, ingredientsJson: dto.ingredientsJson },
+      forbiddenAllergens,
+    );
+    if (!safetyCheck.safe) {
+      throw new BadRequestException(
+        `Không thể lưu món này vì chứa thành phần trùng với dị ứng đã khai báo: ${safetyCheck.matchedAllergens.join(', ')}`,
+      );
+    }
+
     const recipe = await this.prisma.recipe.create({
       data: {
         userId,
@@ -1477,9 +1606,9 @@ Return ONE JSON object — no markdown, no explanation:
         category: dto.category ?? 'OTHER',
         ingredientsJson: ((dto.ingredientsJson ?? []) as unknown) as Prisma.InputJsonValue,
         stepsJson: ((dto.stepsJson ?? []) as unknown) as Prisma.InputJsonValue,
-        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : Prisma.JsonNull,
-        tagsJson: Prisma.JsonNull,
+        nutritionJson: dto.nutritionJson ? ((dto.nutritionJson as unknown) as Prisma.InputJsonValue) : null,
+        missingIngredients: dto.missingIngredients ? ((dto.missingIngredients as unknown) as Prisma.InputJsonValue) : null,
+        tagsJson: null,
       },
     });
 
@@ -1505,10 +1634,41 @@ Return ONE JSON object — no markdown, no explanation:
     mealType: string,
     ingredients: { name: string }[],
     normalizedExcluded: string[] = [],
+    forbiddenAllergens: string[] = [],
   ) {
     const pool = FoodService.FALLBACK_MEALS[mealType] ?? FoodService.FALLBACK_MEALS['LUNCH'];
-    const available = pool.filter((m) => !normalizedExcluded.includes(m.mealName.trim().toLowerCase()));
-    const meal = available[0] ?? pool[0];
+    // The static fallback pool includes dishes like "Tôm rang muối" (shrimp)
+    // or "Phở bò" (beef) by name — allergen safety must filter this pool the
+    // same way it filters AI output, not just deduplicate against exclusions.
+    const allergenSafePool = forbiddenAllergens.length > 0
+      ? pool.filter((m) => this.healthContext.findAllergenMatches(`${m.mealName} ${m.description}`, forbiddenAllergens).length === 0)
+      : pool;
+    const available = allergenSafePool.filter((m) => !normalizedExcluded.includes(m.mealName.trim().toLowerCase()));
+    const meal = available[0] ?? allergenSafePool[0];
+
+    // If every entry in this meal-type's pool matches a forbidden allergen,
+    // fail safely with a generic, ingredient-free suggestion rather than
+    // ever falling back to an unfiltered (potentially unsafe) pool item.
+    if (!meal) {
+      return {
+        mealName: 'Món tự chọn an toàn',
+        description: 'Không tìm được gợi ý phù hợp tránh dị ứng đã khai báo — vui lòng tự chọn món ăn phù hợp.',
+        category: 'OTHER',
+        servings: 1,
+        prepMinutes: 10,
+        cookMinutes: 15,
+        ingredientsJson: [],
+        ingredientsFromInventory: [],
+        missingIngredients: [],
+        stepsJson: [{ step: 1, description: 'Chuẩn bị món ăn an toàn theo dị ứng và tình trạng sức khỏe của bạn.' }],
+        nutritionSummary: '',
+        nutritionJson: {},
+        aiReason: 'Không có gợi ý mặc định nào tránh được toàn bộ dị ứng đã khai báo.',
+        estimatedCalories: 0,
+        isAiGenerated: false,
+        mealType,
+      };
+    }
 
     return {
       mealName: meal.mealName,

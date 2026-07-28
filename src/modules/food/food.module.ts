@@ -5,9 +5,10 @@ import { PrismaModule } from '../../infrastructure/prisma/prisma.module.js';
 import { EventsModule } from '../events/events.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { AIModule } from '../ai/ai.module.js';
+import { ProfileModule } from '../profile/profile.module.js';
 
 @Module({
-  imports: [PrismaModule, EventsModule, AuthModule, AIModule],
+  imports: [PrismaModule, EventsModule, AuthModule, AIModule, ProfileModule],
   controllers: [FoodController],
   providers: [FoodService],
   exports: [FoodService],

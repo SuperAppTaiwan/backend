@@ -10,21 +10,6 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: ai_survival_os_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,7 +42,7 @@ jobs:
       - name: Prisma generate
         run: pnpm db:generate
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_survival_os_test
+          MONGODB_URL: mongodb://localhost:27017/ai_survival_os_test
 
       - name: Lint
         run: pnpm lint
@@ -68,11 +53,11 @@ jobs:
       - name: Test
         run: pnpm test
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_survival_os_test
+          MONGODB_URL: mongodb://localhost:27017/ai_survival_os_test
           JWT_SECRET: test-secret-for-ci
           NODE_ENV: test
 
       - name: Build
         run: pnpm build
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ai_survival_os_test
+          MONGODB_URL: mongodb://localhost:27017/ai_survival_os_test

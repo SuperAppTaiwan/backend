@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider     = "mongodb"
+  url          = env("MONGODB_URL")
+  relationMode = "prisma"
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -127,11 +128,6 @@ enum TaskStatus {
   COMPLETED
   CANCELLED
   OVERDUE
-}
-
-enum TaskSchedulingMode {
-  FIXED
-  AI_AUTO
 }
 
 // AI enums
@@ -257,7 +253,7 @@ enum NotificationStatus {
 // ─── User ────────────────────────────────────────────────────────────────────
 
 model User {
-  id           String     @id @default(cuid())
+  id           String     @id @default(cuid()) @map("_id")
   email        String     @unique
   passwordHash String     @map("password_hash")
   displayName  String     @map("display_name")
@@ -266,53 +262,67 @@ model User {
   createdAt    DateTime   @default(now()) @map("created_at")
   updatedAt    DateTime   @updatedAt @map("updated_at")
 
-  profile           UserProfile?
-  refreshTokens     RefreshToken[]
-  events            Event[]
-  incomeSources     IncomeSource[]
-  incomes           Income[]
-  expenseCategories ExpenseCategory[]
-  expenses          Expense[]
-  budgets           Budget[]
-  goals             Goal[]
-  goalMilestones    GoalMilestone[]
-  goalForecasts     GoalForecast[]
-  vocabProgress     UserVocabularyProgress[]
-  learningPlans     LearningPlan[]
-  reviewSessions    ReviewSession[]
-  fixedEvents              FixedEvent[]
-  tasks                    Task[]
-  schedulePlans            SchedulePlan[]
-  aiProfile                AIProfile?
-  aiSuggestions            AISuggestion[]
-  recommendationLogs       RecommendationLog[]
-  notifications            Notification[]
-  notificationPreference   NotificationPreference?
-  ingredients              Ingredient[]
-  recipes                  Recipe[]
-  mealPlans                MealPlan[]
-  shoppingLists            ShoppingList[]
-  knowledgeArticles        KnowledgeArticle[]
-  knowledgeBookmarks       KnowledgeBookmark[]
-  pushTokens               PushToken[]
-  conversations            Conversation[]
+  profile                UserProfile?
+  refreshTokens          RefreshToken[]
+  events                 Event[]
+  incomeSources          IncomeSource[]
+  incomes                Income[]
+  expenseCategories      ExpenseCategory[]
+  expenses               Expense[]
+  budgets                Budget[]
+  goals                  Goal[]
+  goalMilestones         GoalMilestone[]
+  goalForecasts          GoalForecast[]
+  vocabProgress          UserVocabularyProgress[]
+  learningPlans          LearningPlan[]
+  reviewSessions         ReviewSession[]
+  fixedEvents            FixedEvent[]
+  tasks                  Task[]
+  schedulePlans          SchedulePlan[]
+  aiProfile              AIProfile?
+  aiSuggestions          AISuggestion[]
+  recommendationLogs     RecommendationLog[]
+  notifications          Notification[]
+  notificationPreference NotificationPreference?
+  ingredients            Ingredient[]
+  recipes                Recipe[]
+  mealPlans              MealPlan[]
+  shoppingLists          ShoppingList[]
+  knowledgeArticles      KnowledgeArticle[]
+  knowledgeBookmarks     KnowledgeBookmark[]
+  pushTokens             PushToken[]
+  conversations          Conversation[]
 
   @@map("users")
 }
 
 model UserProfile {
-  id                   String   @id @default(cuid())
-  userId               String   @unique @map("user_id")
-  locationCity         String?  @map("location_city")
-  timezone             String   @default("Asia/Taipei")
-  currency             String   @default("TWD")
-  monthlyBudget        Decimal? @map("monthly_budget") @db.Decimal(12, 2)
-  chineseLevel         String?  @map("chinese_level")
-  dietPreference       String?  @map("diet_preference")
-  livingStatus         String?  @map("living_status")
-  familySupportMonthly Decimal? @map("family_support_monthly") @db.Decimal(12, 2)
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  id                   String  @id @default(cuid()) @map("_id")
+  userId               String  @unique @map("user_id")
+  locationCity         String? @map("location_city")
+  timezone             String  @default("Asia/Taipei")
+  currency             String  @default("TWD")
+  monthlyBudget        Float?  @map("monthly_budget")
+  chineseLevel         String? @map("chinese_level")
+  dietPreference       String? @map("diet_preference")
+  livingStatus         String? @map("living_status")
+  familySupportMonthly Float?  @map("family_support_monthly")
+
+  // ─── Health profile ─────────────────────────────────────────────────────────
+  // weightKg/heightCm are the only stored measurements; BMI is always derived
+  // from them at read time (see UserHealthContextService) rather than persisted,
+  // so it can never drift out of sync with the source values.
+  weightKg         Float? @map("weight_kg")
+  heightCm         Float? @map("height_cm")
+  // Each stored as a JSON array of structured records — see HealthProfileTypes
+  // in user-health-context.service.ts for the shape. Validated at the API
+  // boundary by class-validator DTOs before being persisted here.
+  allergies        Json?  @map("allergies")
+  healthConditions Json?  @map("health_conditions")
+  medications      Json?  @map("medications")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -320,7 +330,7 @@ model UserProfile {
 }
 
 model RefreshToken {
-  id        String    @id @default(cuid())
+  id        String    @id @default(cuid()) @map("_id")
   userId    String    @map("user_id")
   tokenHash String    @map("token_hash")
   expiresAt DateTime  @map("expires_at")
@@ -335,7 +345,7 @@ model RefreshToken {
 // ─── Event Store ─────────────────────────────────────────────────────────────
 
 model Event {
-  id           String      @id @default(cuid())
+  id           String      @id @default(cuid()) @map("_id")
   userId       String?     @map("user_id")
   eventType    String      @map("event_type")
   sourceModule String      @map("source_module")
@@ -352,11 +362,11 @@ model Event {
 // ─── Finance ─────────────────────────────────────────────────────────────────
 
 model IncomeSource {
-  id             String           @id @default(cuid())
+  id             String           @id @default(cuid()) @map("_id")
   userId         String           @map("user_id")
   name           String
   type           IncomeSourceType
-  expectedAmount Decimal          @map("expected_amount") @db.Decimal(12, 2)
+  expectedAmount Float            @map("expected_amount")
   currency       String           @default("TWD")
   isActive       Boolean          @default(true) @map("is_active")
   createdAt      DateTime         @default(now()) @map("created_at")
@@ -369,16 +379,16 @@ model IncomeSource {
 }
 
 model Income {
-  id           String    @id @default(cuid())
-  userId       String    @map("user_id")
-  sourceId     String?   @map("source_id")
-  amount       Decimal   @db.Decimal(12, 2)
-  currency     String    @default("TWD")
-  receivedDate DateTime  @map("received_date")
+  id           String   @id @default(cuid()) @map("_id")
+  userId       String   @map("user_id")
+  sourceId     String?  @map("source_id")
+  amount       Float
+  currency     String   @default("TWD")
+  receivedDate DateTime @map("received_date")
   note         String?
-  eventId      String?   @map("event_id")
-  createdAt    DateTime  @default(now()) @map("created_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  eventId      String?  @map("event_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   source IncomeSource? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
@@ -387,7 +397,7 @@ model Income {
 }
 
 model ExpenseCategory {
-  id        String              @id @default(cuid())
+  id        String              @id @default(cuid()) @map("_id")
   userId    String?             @map("user_id")
   name      String
   type      ExpenseCategoryType
@@ -402,10 +412,10 @@ model ExpenseCategory {
 }
 
 model Expense {
-  id             String        @id @default(cuid())
+  id             String        @id @default(cuid()) @map("_id")
   userId         String        @map("user_id")
   categoryId     String?       @map("category_id")
-  amount         Decimal       @db.Decimal(12, 2)
+  amount         Float
   currency       String        @default("TWD")
   expenseDate    DateTime      @map("expense_date")
   paymentMethod  PaymentMethod @map("payment_method")
@@ -423,11 +433,11 @@ model Expense {
 }
 
 model Budget {
-  id                 String   @id @default(cuid())
+  id                 String   @id @default(cuid()) @map("_id")
   userId             String   @map("user_id")
   month              Int
   year               Int
-  totalLimit         Decimal  @map("total_limit") @db.Decimal(12, 2)
+  totalLimit         Float    @map("total_limit")
   currency           String   @default("TWD")
   categoryLimitsJson Json?    @map("category_limits_json")
   createdAt          DateTime @default(now()) @map("created_at")
@@ -442,12 +452,12 @@ model Budget {
 // ─── Goals ───────────────────────────────────────────────────────────────────
 
 model Goal {
-  id            String       @id @default(cuid())
+  id            String       @id @default(cuid()) @map("_id")
   userId        String       @map("user_id")
   goalType      GoalType     @map("goal_type")
   title         String
-  targetAmount  Decimal?     @map("target_amount") @db.Decimal(12, 2)
-  currentAmount Decimal      @default(0) @map("current_amount") @db.Decimal(12, 2)
+  targetAmount  Float?       @map("target_amount")
+  currentAmount Float        @default(0) @map("current_amount")
   targetDate    DateTime?    @map("target_date")
   priority      GoalPriority @default(MEDIUM)
   status        GoalStatus   @default(ACTIVE)
@@ -463,11 +473,11 @@ model Goal {
 }
 
 model GoalMilestone {
-  id           String    @id @default(cuid())
+  id           String    @id @default(cuid()) @map("_id")
   goalId       String    @map("goal_id")
   userId       String    @map("user_id")
   title        String
-  targetAmount Decimal?  @map("target_amount") @db.Decimal(12, 2)
+  targetAmount Float?    @map("target_amount")
   targetDate   DateTime? @map("target_date")
   isCompleted  Boolean   @default(false) @map("is_completed")
   completedAt  DateTime? @map("completed_at")
@@ -481,11 +491,11 @@ model GoalMilestone {
 }
 
 model GoalForecast {
-  id                    String        @id @default(cuid())
+  id                    String        @id @default(cuid()) @map("_id")
   goalId                String        @map("goal_id")
   userId                String        @map("user_id")
-  requiredMonthlySaving Decimal?      @map("required_monthly_saving") @db.Decimal(12, 2)
-  currentMonthlySaving  Decimal?      @map("current_monthly_saving") @db.Decimal(12, 2)
+  requiredMonthlySaving Float?        @map("required_monthly_saving")
+  currentMonthlySaving  Float?        @map("current_monthly_saving")
   probability           Int
   riskLevel             GoalRiskLevel @map("risk_level")
   forecastDate          DateTime      @default(now()) @map("forecast_date")
@@ -501,21 +511,21 @@ model GoalForecast {
 // ─── Learning ────────────────────────────────────────────────────────────────
 
 model Vocabulary {
-  id                    String   @id @default(cuid())
-  traditional           String
-  simplified            String
-  pinyin                String
-  meaningVi             String   @map("meaning_vi")
-  meaningEn             String?  @map("meaning_en")
-  exampleTraditional    String?  @map("example_traditional")
-  exampleSimplified     String?  @map("example_simplified")
-  examplePinyin         String?  @map("example_pinyin")
-  exampleMeaningVi      String?  @map("example_meaning_vi")
-  hskLevel              Int?     @map("hsk_level")
-  topic                 String?
-  source                String   @default("system")
-  createdAt             DateTime @default(now()) @map("created_at")
-  updatedAt             DateTime @updatedAt @map("updated_at")
+  id                 String   @id @default(cuid()) @map("_id")
+  traditional        String
+  simplified         String
+  pinyin             String
+  meaningVi          String   @map("meaning_vi")
+  meaningEn          String?  @map("meaning_en")
+  exampleTraditional String?  @map("example_traditional")
+  exampleSimplified  String?  @map("example_simplified")
+  examplePinyin      String?  @map("example_pinyin")
+  exampleMeaningVi   String?  @map("example_meaning_vi")
+  hskLevel           Int?     @map("hsk_level")
+  topic              String?
+  source             String   @default("system")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   userProgress   UserVocabularyProgress[]
   reviewSessions ReviewSession[]
@@ -524,7 +534,7 @@ model Vocabulary {
 }
 
 model UserVocabularyProgress {
-  id             String           @id @default(cuid())
+  id             String           @id @default(cuid()) @map("_id")
   userId         String           @map("user_id")
   vocabularyId   String           @map("vocabulary_id")
   status         VocabularyStatus @default(NEW)
@@ -544,17 +554,17 @@ model UserVocabularyProgress {
 }
 
 model LearningPlan {
-  id             String             @id @default(cuid())
-  userId         String             @map("user_id")
-  title          String
-  targetLevel    String?            @map("target_level")
-  dailyWordTarget Int               @default(2) @map("daily_word_target")
-  startDate      DateTime           @map("start_date")
-  endDate        DateTime?          @map("end_date")
-  status         LearningPlanStatus @default(ACTIVE)
-  metadataJson   Json?              @map("metadata_json")
-  createdAt      DateTime           @default(now()) @map("created_at")
-  updatedAt      DateTime           @updatedAt @map("updated_at")
+  id              String             @id @default(cuid()) @map("_id")
+  userId          String             @map("user_id")
+  title           String
+  targetLevel     String?            @map("target_level")
+  dailyWordTarget Int                @default(2) @map("daily_word_target")
+  startDate       DateTime           @map("start_date")
+  endDate         DateTime?          @map("end_date")
+  status          LearningPlanStatus @default(ACTIVE)
+  metadataJson    Json?              @map("metadata_json")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -562,7 +572,7 @@ model LearningPlan {
 }
 
 model ReviewSession {
-  id           String       @id @default(cuid())
+  id           String       @id @default(cuid()) @map("_id")
   userId       String       @map("user_id")
   vocabularyId String?      @map("vocabulary_id")
   result       ReviewResult
@@ -580,7 +590,7 @@ model ReviewSession {
 // ─── Schedule ────────────────────────────────────────────────────────────────
 
 model FixedEvent {
-  id             String         @id @default(cuid())
+  id             String         @id @default(cuid()) @map("_id")
   userId         String         @map("user_id")
   title          String
   description    String?
@@ -593,58 +603,34 @@ model FixedEvent {
   createdAt      DateTime       @default(now()) @map("created_at")
   updatedAt      DateTime       @updatedAt @map("updated_at")
 
-  seriesId                String?   @map("series_id")
-  originalOccurrenceStart DateTime? @map("original_occurrence_start")
-  isRecurrenceException   Boolean   @default(false) @map("is_recurrence_exception")
-  isCancelled             Boolean   @default(false) @map("is_cancelled")
-  recurrenceEndAt         DateTime? @map("recurrence_end_at")
-  recurrenceTimezone      String?   @map("recurrence_timezone")
-
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, startTime])
-  @@index([userId, seriesId])
   @@map("fixed_events")
 }
 
 model Task {
-  id               String             @id @default(cuid())
-  userId           String             @map("user_id")
+  id               String       @id @default(cuid()) @map("_id")
+  userId           String       @map("user_id")
   title            String
   description      String?
-  priority         TaskPriority       @default(MEDIUM)
-  status           TaskStatus         @default(TODO)
+  priority         TaskPriority @default(MEDIUM)
+  status           TaskStatus   @default(TODO)
   deadline         DateTime?
-  estimatedMinutes Int?               @map("estimated_minutes")
-  scheduledStart   DateTime?          @map("scheduled_start")
-  scheduledEnd     DateTime?          @map("scheduled_end")
-  sourceModule     String             @default("manual") @map("source_module")
-  sourceEntityId   String?            @map("source_entity_id")
-  createdAt        DateTime           @default(now()) @map("created_at")
-  updatedAt        DateTime           @updatedAt @map("updated_at")
-
-  schedulingMode          TaskSchedulingMode @default(AI_AUTO) @map("scheduling_mode")
-  timezone                String             @default("Asia/Taipei")
-  recurrenceRule          String?            @map("recurrence_rule")
-  recurrenceTimezone      String?            @map("recurrence_timezone")
-  recurrenceEndAt         DateTime?          @map("recurrence_end_at")
-  seriesId                String?            @map("series_id")
-  originalOccurrenceStart DateTime?          @map("original_occurrence_start")
-  isRecurrenceException   Boolean            @default(false) @map("is_recurrence_exception")
-  isCancelled             Boolean            @default(false) @map("is_cancelled")
-  aiConstraints           Json?              @map("ai_constraints")
-  scheduleReason          String?            @map("schedule_reason")
+  estimatedMinutes Int?         @map("estimated_minutes")
+  scheduledStart   DateTime?    @map("scheduled_start")
+  scheduledEnd     DateTime?    @map("scheduled_end")
+  sourceModule     String       @default("manual") @map("source_module")
+  sourceEntityId   String?      @map("source_entity_id")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([userId, scheduledStart])
-  @@index([userId, status])
-  @@index([userId, seriesId])
   @@map("tasks")
 }
 
 model SchedulePlan {
-  id        String   @id @default(cuid())
+  id        String   @id @default(cuid()) @map("_id")
   userId    String   @map("user_id")
   planDate  DateTime @map("plan_date")
   summary   String?
@@ -660,16 +646,16 @@ model SchedulePlan {
 // ─── AI ──────────────────────────────────────────────────────────────────────
 
 model AIProfile {
-  id                        String   @id @default(cuid())
-  userId                    String   @unique @map("user_id")
-  financialHealthScore      Int      @default(0) @map("financial_health_score")
-  learningConsistencyScore  Int      @default(0) @map("learning_consistency_score")
-  nutritionScore            Int      @default(0) @map("nutrition_score")
-  productivityScore         Int      @default(0) @map("productivity_score")
-  goalRiskScore             Int      @default(0) @map("goal_risk_score")
-  profileJson               Json?    @map("profile_json")
-  createdAt                 DateTime @default(now()) @map("created_at")
-  updatedAt                 DateTime @updatedAt @map("updated_at")
+  id                       String   @id @default(cuid()) @map("_id")
+  userId                   String   @unique @map("user_id")
+  financialHealthScore     Int      @default(0) @map("financial_health_score")
+  learningConsistencyScore Int      @default(0) @map("learning_consistency_score")
+  nutritionScore           Int      @default(0) @map("nutrition_score")
+  productivityScore        Int      @default(0) @map("productivity_score")
+  goalRiskScore            Int      @default(0) @map("goal_risk_score")
+  profileJson              Json?    @map("profile_json")
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -677,7 +663,7 @@ model AIProfile {
 }
 
 model AISuggestion {
-  id             String               @id @default(cuid())
+  id             String               @id @default(cuid()) @map("_id")
   userId         String               @map("user_id")
   type           AISuggestionType
   title          String
@@ -696,7 +682,7 @@ model AISuggestion {
 }
 
 model RecommendationLog {
-  id          String   @id @default(cuid())
+  id          String   @id @default(cuid()) @map("_id")
   userId      String   @map("user_id")
   requestType String   @map("request_type")
   inputJson   Json?    @map("input_json")
@@ -712,7 +698,7 @@ model RecommendationLog {
 // ─── Notifications ────────────────────────────────────────────────────────────
 
 model Notification {
-  id           String             @id @default(cuid())
+  id           String             @id @default(cuid()) @map("_id")
   userId       String             @map("user_id")
   type         NotificationType
   title        String
@@ -730,19 +716,19 @@ model Notification {
 }
 
 model NotificationPreference {
-  id                String   @id @default(cuid())
-  userId            String   @unique @map("user_id")
-  taskReminder      Boolean  @default(true) @map("task_reminder")
-  goalReminder      Boolean  @default(true) @map("goal_reminder")
-  budgetWarning     Boolean  @default(true) @map("budget_warning")
-  dailyVocabulary   Boolean  @default(true) @map("daily_vocabulary")
-  weeklySummary     Boolean  @default(true) @map("weekly_summary")
-  pushEnabled       Boolean  @default(false) @map("push_enabled")
-  emailEnabled      Boolean  @default(false) @map("email_enabled")
-  quietHoursStart   String?  @map("quiet_hours_start")
-  quietHoursEnd     String?  @map("quiet_hours_end")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(cuid()) @map("_id")
+  userId          String   @unique @map("user_id")
+  taskReminder    Boolean  @default(true) @map("task_reminder")
+  goalReminder    Boolean  @default(true) @map("goal_reminder")
+  budgetWarning   Boolean  @default(true) @map("budget_warning")
+  dailyVocabulary Boolean  @default(true) @map("daily_vocabulary")
+  weeklySummary   Boolean  @default(true) @map("weekly_summary")
+  pushEnabled     Boolean  @default(false) @map("push_enabled")
+  emailEnabled    Boolean  @default(false) @map("email_enabled")
+  quietHoursStart String?  @map("quiet_hours_start")
+  quietHoursEnd   String?  @map("quiet_hours_end")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -752,26 +738,26 @@ model NotificationPreference {
 // ─── Food ─────────────────────────────────────────────────────────────────────
 
 model Ingredient {
-  id                    String        @id @default(cuid())
-  userId                String        @map("user_id")
-  name                  String
-  category              FoodCategory  @default(OTHER)
-  unit                  UnitOfMeasure @default(PIECE)
-  quantity              Decimal       @default(0) @db.Decimal(10, 3)
-  expiresAt             DateTime?     @map("expires_at")
-  purchasedAt           DateTime?     @map("purchased_at")
-  cost                  Decimal?      @db.Decimal(10, 2)
-  location              String?
-  notes                 String?
-  sourceType            String        @default("manual") @map("source_type")
-  imageUrl              String?       @map("image_url")
-  expirySource          String        @default("manual") @map("expiry_source")
-  freshnessStatus       String?       @map("freshness_status")
-  estimatedDaysRemaining Int?         @map("estimated_days_remaining")
-  aiConfidence          Decimal?      @map("ai_confidence") @db.Decimal(5, 2)
-  ocrRawText            String?       @map("ocr_raw_text")
-  createdAt             DateTime      @default(now()) @map("created_at")
-  updatedAt             DateTime      @updatedAt @map("updated_at")
+  id                     String        @id @default(cuid()) @map("_id")
+  userId                 String        @map("user_id")
+  name                   String
+  category               FoodCategory  @default(OTHER)
+  unit                   UnitOfMeasure @default(PIECE)
+  quantity               Float         @default(0)
+  expiresAt              DateTime?     @map("expires_at")
+  purchasedAt            DateTime?     @map("purchased_at")
+  cost                   Float?
+  location               String?
+  notes                  String?
+  sourceType             String        @default("manual") @map("source_type")
+  imageUrl               String?       @map("image_url")
+  expirySource           String        @default("manual") @map("expiry_source")
+  freshnessStatus        String?       @map("freshness_status")
+  estimatedDaysRemaining Int?          @map("estimated_days_remaining")
+  aiConfidence           Float?        @map("ai_confidence")
+  ocrRawText             String?       @map("ocr_raw_text")
+  createdAt              DateTime      @default(now()) @map("created_at")
+  updatedAt              DateTime      @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -779,26 +765,26 @@ model Ingredient {
 }
 
 model Recipe {
-  id                  String        @id @default(cuid())
-  userId              String        @map("user_id")
-  title               String
-  description         String?
-  servings            Int           @default(1)
-  prepMinutes         Int           @default(0) @map("prep_minutes")
-  cookMinutes         Int           @default(0) @map("cook_minutes")
-  isPublic            Boolean       @default(false) @map("is_public")
-  isAiGenerated       Boolean       @default(false) @map("is_ai_generated")
-  category            FoodCategory  @default(OTHER)
-  ingredientsJson     Json          @map("ingredients_json")
-  stepsJson           Json          @map("steps_json")
-  tagsJson            Json?         @map("tags_json")
-  missingIngredients  Json?         @map("missing_ingredients")
-  nutritionJson       Json?         @map("nutrition_json")
-  aiReason            String?       @map("ai_reason")
-  imageUrl            String?       @map("image_url")
-  source              String?
-  createdAt           DateTime      @default(now()) @map("created_at")
-  updatedAt           DateTime      @updatedAt @map("updated_at")
+  id                 String       @id @default(cuid()) @map("_id")
+  userId             String       @map("user_id")
+  title              String
+  description        String?
+  servings           Int          @default(1)
+  prepMinutes        Int          @default(0) @map("prep_minutes")
+  cookMinutes        Int          @default(0) @map("cook_minutes")
+  isPublic           Boolean      @default(false) @map("is_public")
+  isAiGenerated      Boolean      @default(false) @map("is_ai_generated")
+  category           FoodCategory @default(OTHER)
+  ingredientsJson    Json         @map("ingredients_json")
+  stepsJson          Json         @map("steps_json")
+  tagsJson           Json?        @map("tags_json")
+  missingIngredients Json?        @map("missing_ingredients")
+  nutritionJson      Json?        @map("nutrition_json")
+  aiReason           String?      @map("ai_reason")
+  imageUrl           String?      @map("image_url")
+  source             String?
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
 
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   mealPlans MealPlan[]
@@ -807,7 +793,7 @@ model Recipe {
 }
 
 model MealPlan {
-  id               String   @id @default(cuid())
+  id               String   @id @default(cuid()) @map("_id")
   userId           String   @map("user_id")
   planDate         DateTime @map("plan_date")
   mealType         MealType @map("meal_type")
@@ -828,7 +814,7 @@ model MealPlan {
 }
 
 model ShoppingList {
-  id        String             @id @default(cuid())
+  id        String             @id @default(cuid()) @map("_id")
   userId    String             @map("user_id")
   name      String
   status    ShoppingListStatus @default(ACTIVE)
@@ -843,13 +829,13 @@ model ShoppingList {
 }
 
 model ShoppingListItem {
-  id             String        @id @default(cuid())
+  id             String        @id @default(cuid()) @map("_id")
   shoppingListId String        @map("shopping_list_id")
   ingredientName String        @map("ingredient_name")
-  quantity       Decimal       @default(1) @db.Decimal(10, 3)
+  quantity       Float         @default(1)
   unit           UnitOfMeasure @default(PIECE)
   isPurchased    Boolean       @default(false) @map("is_purchased")
-  estimatedCost  Decimal?      @map("estimated_cost") @db.Decimal(10, 2)
+  estimatedCost  Float?        @map("estimated_cost")
   notes          String?
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
@@ -862,7 +848,7 @@ model ShoppingListItem {
 // ─── Knowledge ────────────────────────────────────────────────────────────────
 
 model KnowledgeArticle {
-  id                   String              @id @default(cuid())
+  id                   String              @id @default(cuid()) @map("_id")
   authorId             String              @map("author_id")
   title                String
   summary              String
@@ -883,7 +869,7 @@ model KnowledgeArticle {
 }
 
 model KnowledgeBookmark {
-  id        String   @id @default(cuid())
+  id        String   @id @default(cuid()) @map("_id")
   userId    String   @map("user_id")
   articleId String   @map("article_id")
   notes     String?
@@ -899,7 +885,7 @@ model KnowledgeBookmark {
 // ─── AI Conversations ────────────────────────────────────────────────────────
 
 model Conversation {
-  id        String   @id @default(cuid())
+  id        String   @id @default(cuid()) @map("_id")
   userId    String   @map("user_id")
   title     String   @default("Cuộc trò chuyện")
   createdAt DateTime @default(now()) @map("created_at")
@@ -912,7 +898,7 @@ model Conversation {
 }
 
 model ConversationMessage {
-  id             String   @id @default(cuid())
+  id             String   @id @default(cuid()) @map("_id")
   conversationId String   @map("conversation_id")
   role           String
   content        String
@@ -927,7 +913,7 @@ model ConversationMessage {
 // ─── Push Tokens ─────────────────────────────────────────────────────────────
 
 model PushToken {
-  id        String       @id @default(cuid())
+  id        String       @id @default(cuid()) @map("_id")
   userId    String       @map("user_id")
   token     String
   platform  PushPlatform @default(IOS)

@@ -7,10 +7,12 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
+import { normalizeAllergies, normalizeHealthConditions, normalizeMedications } from '../profile/health-profile.util.js';
 
 const REFRESH_TOKEN_EXPIRES_DAYS = 30;
 const ACCESS_TOKEN_EXPIRES = '15m';
@@ -56,13 +58,23 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
 
+    // Health fields are all optional at registration. The nested `profile.create`
+    // is wrapped in Prisma's implicit transaction (supported on MongoDB replica
+    // sets), so a failure here rolls back the whole user creation rather than
+    // leaving a partially-created account.
     const user = await this.prisma.user.create({
       data: {
         email: normalizedEmail,
         passwordHash,
         displayName: dto.displayName.trim(),
         profile: {
-          create: {},
+          create: {
+            ...(dto.weightKg !== undefined && dto.weightKg !== null && { weightKg: dto.weightKg }),
+            ...(dto.heightCm !== undefined && dto.heightCm !== null && { heightCm: dto.heightCm }),
+            ...(dto.allergies && { allergies: normalizeAllergies(dto.allergies) as unknown as Prisma.InputJsonValue }),
+            ...(dto.healthConditions && { healthConditions: normalizeHealthConditions(dto.healthConditions) as unknown as Prisma.InputJsonValue }),
+            ...(dto.medications && { medications: normalizeMedications(dto.medications) as unknown as Prisma.InputJsonValue }),
+          },
         },
       },
     });
@@ -174,7 +186,7 @@ export class AuthService {
     expiresAt.setDate(expiresAt.getDate() + REFRESH_TOKEN_EXPIRES_DAYS);
 
     await this.prisma.refreshToken.create({
-      data: { userId, tokenHash, expiresAt },
+      data: { userId, tokenHash, expiresAt, revokedAt: null },
     });
 
     return {

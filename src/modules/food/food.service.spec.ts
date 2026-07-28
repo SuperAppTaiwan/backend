@@ -5,6 +5,7 @@ import { FoodService } from './food.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
+import { UserHealthContextService } from '../profile/user-health-context.service.js';
 import { FoodCategory, MealType, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 
 const USER_ID = 'user-food-test';
@@ -82,6 +83,13 @@ describe('FoodService', () => {
   let prisma: MockedPrisma;
   let eventsService: { publish: jest.Mock };
   let aiChain: { generateText: jest.Mock; generateTextWithVision: jest.Mock };
+  let healthContext: {
+    buildAIHealthContext: jest.Mock;
+    buildForbiddenAllergenList: jest.Mock;
+    hasSevereAllergy: jest.Mock;
+    findAllergenMatches: jest.Mock;
+    checkRecipeForAllergens: jest.Mock;
+  };
 
   beforeEach(async () => {
     const mockPrisma = {
@@ -94,10 +102,24 @@ describe('FoodService', () => {
       expense: { create: jest.fn() },
       fixedEvent: { findMany: jest.fn().mockResolvedValue([]) },
       task: { findMany: jest.fn().mockResolvedValue([]) },
+      userProfile: { findUnique: jest.fn().mockResolvedValue({ dietPreference: null }) },
     };
 
     const mockEvents = { publish: jest.fn().mockResolvedValue(undefined) };
     const mockAIChain = { generateText: jest.fn().mockResolvedValue(''), generateTextWithVision: jest.fn().mockResolvedValue('') };
+
+    // Defaults to "no health data" so pre-existing (non-health) test cases
+    // behave exactly as before; individual health-aware tests override these.
+    const mockHealthContext = {
+      buildAIHealthContext: jest.fn().mockResolvedValue({
+        heightCm: null, weightKg: null, bmi: null, bmiCategory: null,
+        allergies: [], healthConditions: [], medications: [], hasCompleteProfile: false,
+      }),
+      buildForbiddenAllergenList: jest.fn().mockReturnValue([]),
+      hasSevereAllergy: jest.fn().mockReturnValue(false),
+      findAllergenMatches: jest.fn().mockReturnValue([]),
+      checkRecipeForAllergens: jest.fn().mockReturnValue({ safe: true, matchedAllergens: [] }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -106,6 +128,7 @@ describe('FoodService', () => {
         { provide: EventsService, useValue: mockEvents },
         { provide: AIProviderChain, useValue: mockAIChain },
         { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue(undefined) } },
+        { provide: UserHealthContextService, useValue: mockHealthContext },
       ],
     }).compile();
 
@@ -113,6 +136,7 @@ describe('FoodService', () => {
     prisma = module.get(PrismaService);
     eventsService = module.get(EventsService);
     aiChain = module.get(AIProviderChain) as unknown as { generateText: jest.Mock; generateTextWithVision: jest.Mock };
+    healthContext = module.get(UserHealthContextService);
   });
 
   // ─── Ingredient ────────────────────────────────────────────────────────────
@@ -299,6 +323,111 @@ describe('FoodService', () => {
 
       expect(result).toHaveLength(2);
       expect(result.every((r) => r.basedOnInventory === false && r.isAiGenerated === false)).toBe(true);
+    });
+  });
+
+  describe('generateRecipes — health-aware allergen safety', () => {
+    it('loads the authenticated user\'s health context and includes forbidden allergens in the prompt', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      healthContext.buildAIHealthContext.mockResolvedValue({
+        heightCm: 170, weightKg: 90, bmi: 31.1, bmiCategory: 'Béo phì độ II',
+        allergies: [{ name: 'Đậu phộng', severity: 'severe' }], healthConditions: [], medications: [], hasCompleteProfile: true,
+      });
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['đậu phộng', 'peanut', 'peanuts']);
+      aiChain.generateText.mockResolvedValue(JSON.stringify([{ title: 'Cơm chiên trứng', category: 'GRAIN', ingredientsJson: [] }]));
+
+      await service.generateRecipes(USER_ID, {});
+
+      expect(healthContext.buildAIHealthContext).toHaveBeenCalledWith(USER_ID);
+      expect(aiChain.generateText).toHaveBeenCalledWith(expect.stringContaining('đậu phộng'));
+    });
+
+    it('rejects a generated recipe containing an allergen and retries once with a correction notice', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.checkRecipeForAllergens
+        .mockReturnValueOnce({ safe: false, matchedAllergens: ['tôm'] }) // 1st attempt: unsafe
+        .mockReturnValueOnce({ safe: true, matchedAllergens: [] }); // 2nd attempt (retry): safe
+
+      aiChain.generateText
+        .mockResolvedValueOnce(JSON.stringify([{ title: 'Tôm rang muối', category: 'SEAFOOD', ingredientsJson: [] }]))
+        .mockResolvedValueOnce(JSON.stringify([{ title: 'Gà xào sả', category: 'MEAT', ingredientsJson: [] }]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      expect(aiChain.generateText).toHaveBeenCalledTimes(2);
+      // The retry prompt must call out what went wrong.
+      expect(aiChain.generateText.mock.calls[1][0]).toContain('tôm');
+      expect(result).toHaveLength(1);
+      expect((result[0] as Record<string, unknown>).title).toBe('Gà xào sả');
+    });
+
+    it('fails safely (drops unsafe recipes rather than returning them) after exhausting retries', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.checkRecipeForAllergens.mockReturnValue({ safe: false, matchedAllergens: ['tôm'] }); // always unsafe
+
+      aiChain.generateText.mockResolvedValue(JSON.stringify([{ title: 'Tôm rang muối', category: 'SEAFOOD', ingredientsJson: [] }]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      // Every AI-suggested recipe was unsafe on every attempt, so none should
+      // be returned — the response is never silently unsafe.
+      expect(result.every((r) => (r as Record<string, unknown>).title !== 'Tôm rang muối')).toBe(true);
+      expect(aiChain.generateText).toHaveBeenCalledTimes(2); // capped at MAX_ATTEMPTS
+    });
+
+    it('still generates recipes when the health profile is empty/incomplete', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      // healthContext defaults (from beforeEach) already represent an empty profile.
+      aiChain.generateText.mockResolvedValue(JSON.stringify([{ title: 'Cơm chiên trứng', category: 'GRAIN', ingredientsJson: [] }]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      expect(result).toHaveLength(1);
+    });
+
+    it('adds a severe-allergy warning to every recipe when the user has a severe allergy', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      healthContext.hasSevereAllergy.mockReturnValue(true);
+      aiChain.generateText.mockResolvedValue(JSON.stringify([{ title: 'Cơm chiên trứng', category: 'GRAIN', ingredientsJson: [] }]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      const warnings = (result[0] as Record<string, unknown>).healthSuitability as { warnings: string[] };
+      expect(warnings.warnings.some((w) => w.includes('NẶNG'))).toBe(true);
+    });
+
+    it('always includes the general AI-recipe safety disclaimer, even without a severe allergy', async () => {
+      prisma.ingredient.findMany.mockResolvedValue([]);
+      aiChain.generateText.mockResolvedValue(JSON.stringify([{ title: 'Cơm chiên trứng', category: 'GRAIN', ingredientsJson: [] }]));
+
+      const result = await service.generateRecipes(USER_ID, {});
+
+      const warnings = (result[0] as Record<string, unknown>).healthSuitability as { warnings: string[] };
+      expect(warnings.warnings.length).toBeGreaterThan(0);
+    });
+
+    it('regression: excludes a pantry ingredient matching a known allergen from the deterministic fallback (AI unavailable)', async () => {
+      // This is the critical bug caught during manual testing: the deterministic
+      // fallback used to build a dish name directly from pantry item names,
+      // completely bypassing allergen safety when the AI is rate-limited/down.
+      const ingredients = [
+        makeIngredient({ name: 'Đậu phộng rang', category: FoodCategory.SNACK }),
+        makeIngredient({ id: 'ing-2', name: 'Gà', category: FoodCategory.MEAT }),
+      ];
+      prisma.ingredient.findMany.mockResolvedValue(ingredients as never);
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['đậu phộng']);
+      healthContext.findAllergenMatches.mockImplementation((text: string, terms: string[]) =>
+        terms.filter((t) => text.toLowerCase().includes(t)),
+      );
+      aiChain.generateText.mockResolvedValue(''); // AI unavailable -> deterministic fallback
+
+      const result = await service.generateRecipes(USER_ID, { count: 1 });
+
+      const allText = JSON.stringify(result);
+      expect(allText).not.toContain('Đậu phộng');
+      expect(allText).toContain('Gà');
     });
   });
 
@@ -539,6 +668,55 @@ describe('FoodService', () => {
       expect(result.isBusySlot).toBe(true);
       expect((result as Record<string, unknown>).prepMinutes).toBeDefined();
     });
+
+    it('rejects an AI meal suggestion containing an allergen and retries with a correction notice', async () => {
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.checkRecipeForAllergens
+        .mockReturnValueOnce({ safe: false, matchedAllergens: ['tôm'] })
+        .mockReturnValueOnce({ safe: true, matchedAllergens: [] });
+
+      aiChain.generateText
+        .mockResolvedValueOnce(JSON.stringify(makeAiSuggestion({ mealName: 'Tôm rang muối' })))
+        .mockResolvedValueOnce(JSON.stringify(makeAiSuggestion({ mealName: 'Gà xào sả' })));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.DINNER });
+
+      expect(aiChain.generateText).toHaveBeenCalledTimes(2);
+      expect((result as Record<string, unknown>).mealName).toBe('Gà xào sả');
+    });
+
+    it('fails safely to the deterministic fallback after exhausting retries on an unsafe suggestion', async () => {
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.checkRecipeForAllergens.mockReturnValue({ safe: false, matchedAllergens: ['tôm'] });
+      aiChain.generateText.mockResolvedValue(JSON.stringify(makeAiSuggestion({ mealName: 'Tôm rang muối' })));
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.DINNER });
+
+      expect((result as Record<string, unknown>).mealName).not.toBe('Tôm rang muối');
+      expect(result.isAiGenerated).toBe(false);
+    });
+
+    it('regression: the deterministic fallback pool itself is filtered by allergen (e.g. "Tôm rang muối" in DINNER pool)', async () => {
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.findAllergenMatches.mockImplementation((text: string, terms: string[]) =>
+        terms.filter((t) => text.toLowerCase().includes(t)),
+      );
+      aiChain.generateText.mockResolvedValue(''); // AI unavailable -> deterministic fallback
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.DINNER });
+
+      expect((result as Record<string, unknown>).mealName).not.toBe('Tôm rang muối');
+    });
+
+    it('adds a severe-allergy warning to the deterministic fallback suggestion too, not just the AI path', async () => {
+      healthContext.hasSevereAllergy.mockReturnValue(true);
+      aiChain.generateText.mockResolvedValue(''); // deterministic fallback
+
+      const result = await service.suggestMeal(USER_ID, { planDate: PLAN_DATE, mealType: MealType.BREAKFAST });
+
+      const suitability = (result as Record<string, unknown>).healthSuitability as { warnings: string[] };
+      expect(suitability.warnings.some((w) => w.includes('NẶNG'))).toBe(true);
+    });
   });
 
   // ─── acceptMealSuggestion ─────────────────────────────────────────────────
@@ -620,6 +798,24 @@ describe('FoodService', () => {
           data: expect.objectContaining({ ingredientsJson, stepsJson }),
         }),
       );
+    });
+
+    it('rejects and does not persist a client-submitted meal that matches a declared allergen (defense in depth)', async () => {
+      healthContext.buildForbiddenAllergenList.mockReturnValue(['tôm']);
+      healthContext.checkRecipeForAllergens.mockReturnValue({ safe: false, matchedAllergens: ['tôm'] });
+
+      await expect(
+        service.acceptMealSuggestion(USER_ID, {
+          planDate: '2026-07-01',
+          mealType: MealType.DINNER,
+          mealName: 'Tôm rang muối',
+          ingredientsJson: [{ name: 'Tôm', quantity: 200, unit: UnitOfMeasure.GRAM }],
+          stepsJson: [{ step: 1, description: 'Rang tôm.' }],
+        }),
+      ).rejects.toThrow();
+
+      expect(prisma.recipe.create).not.toHaveBeenCalled();
+      expect(prisma.mealPlan.create).not.toHaveBeenCalled();
     });
   });
 

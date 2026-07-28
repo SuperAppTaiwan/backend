@@ -10,7 +10,7 @@ describe('HealthController', () => {
     check: jest.fn().mockResolvedValue({ status: 'ok' }),
   };
   const mockPrismaService = {
-    $queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+    $runCommandRaw: jest.fn().mockResolvedValue({ ok: 1 }),
   };
 
   beforeEach(async () => {

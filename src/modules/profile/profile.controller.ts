@@ -8,6 +8,7 @@ import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { UpdatePreferencesDto } from './dto/update-preferences.dto.js';
 import { UpdateLocationDto } from './dto/update-location.dto.js';
 import { UpdateFamilySupportDto } from './dto/update-family-support.dto.js';
+import { UpdateHealthProfileDto } from './dto/health-profile.dto.js';
 
 @ApiTags('Profile')
 @ApiBearerAuth()
@@ -50,5 +51,12 @@ export class ProfileController {
   @ApiResponse({ status: 200, description: 'Family support updated' })
   updateFamilySupport(@CurrentUser() user: AuthUser, @Body() dto: UpdateFamilySupportDto) {
     return this.profileService.updateFamilySupport(user.userId, dto);
+  }
+
+  @Put('health')
+  @ApiOperation({ summary: 'Update health profile (weight, height, allergies, health conditions, medications)' })
+  @ApiResponse({ status: 200, description: 'Health profile updated' })
+  updateHealthProfile(@CurrentUser() user: AuthUser, @Body() dto: UpdateHealthProfileDto) {
+    return this.profileService.updateHealthProfile(user.userId, dto);
   }
 }

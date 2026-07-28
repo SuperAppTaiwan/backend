@@ -29,7 +29,7 @@ jobs:
       - name: Build
         run: pnpm build
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MONGODB_URL: ${{ secrets.MONGODB_URL }}
 
       # ── Docker build + push (adapt to your registry) ──────────────────────────
       # - name: Build Docker image
@@ -52,7 +52,7 @@ jobs:
       #     railway_token: ${{ secrets.RAILWAY_TOKEN }}
       #     service: ai-survival-os-backend
 
-      - name: Run migrations
+      - name: Push schema to MongoDB
         run: pnpm db:migrate:prod
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MONGODB_URL: ${{ secrets.MONGODB_URL }}
