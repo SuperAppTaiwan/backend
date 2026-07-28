@@ -657,8 +657,8 @@ Write ONE short, friendly Vietnamese sentence of practical advice (max 40 words)
           category: s.category ?? FoodCategory.OTHER,
           ingredientsJson: (ingredients as unknown) as Prisma.InputJsonValue,
           stepsJson: ((s.stepsJson?.length ? s.stepsJson : [{ step: 1, description: 'Chuẩn bị nguyên liệu và chế biến theo khẩu vị.' }]) as unknown) as Prisma.InputJsonValue,
-          nutritionJson: (s.nutrition ?? (s.calories ? { calories: s.calories } : undefined)) as unknown as Prisma.InputJsonValue ?? Prisma.JsonNull,
-          tagsJson: Prisma.JsonNull,
+          nutritionJson: ((s.nutrition ?? (s.calories ? { calories: s.calories } : null)) as unknown) as Prisma.InputJsonValue | null,
+          tagsJson: null,
         },
       });
       await this.events.publish({ userId, eventType: EventType.RECIPE_CREATED, sourceModule: 'food', payload: { id: created.id, title: created.title } });

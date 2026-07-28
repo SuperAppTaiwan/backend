@@ -130,6 +130,11 @@ enum TaskStatus {
   OVERDUE
 }
 
+enum SchedulingMode {
+  FIXED
+  AI_AUTO
+}
+
 // AI enums
 enum AISuggestionType {
   FINANCE
@@ -590,18 +595,24 @@ model ReviewSession {
 // ─── Schedule ────────────────────────────────────────────────────────────────
 
 model FixedEvent {
-  id             String         @id @default(cuid()) @map("_id")
-  userId         String         @map("user_id")
-  title          String
-  description    String?
-  location       String?
-  startTime      DateTime       @map("start_time")
-  endTime        DateTime       @map("end_time")
-  timezone       String         @default("Asia/Taipei")
-  recurrenceRule String?        @map("recurrence_rule")
-  eventType      FixedEventType @default(GENERAL) @map("event_type")
-  createdAt      DateTime       @default(now()) @map("created_at")
-  updatedAt      DateTime       @updatedAt @map("updated_at")
+  id                      String         @id @default(cuid()) @map("_id")
+  userId                  String         @map("user_id")
+  title                   String
+  description             String?
+  location                String?
+  startTime               DateTime       @map("start_time")
+  endTime                 DateTime       @map("end_time")
+  timezone                String         @default("Asia/Taipei")
+  recurrenceRule          String?        @map("recurrence_rule")
+  seriesId                String?        @map("series_id")
+  originalOccurrenceStart DateTime?      @map("original_occurrence_start")
+  isRecurrenceException   Boolean        @default(false) @map("is_recurrence_exception")
+  isCancelled             Boolean        @default(false) @map("is_cancelled")
+  recurrenceEndAt         DateTime?      @map("recurrence_end_at")
+  recurrenceTimezone      String?        @map("recurrence_timezone")
+  eventType               FixedEventType @default(GENERAL) @map("event_type")
+  createdAt               DateTime       @default(now()) @map("created_at")
+  updatedAt               DateTime       @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -609,20 +620,31 @@ model FixedEvent {
 }
 
 model Task {
-  id               String       @id @default(cuid()) @map("_id")
-  userId           String       @map("user_id")
-  title            String
-  description      String?
-  priority         TaskPriority @default(MEDIUM)
-  status           TaskStatus   @default(TODO)
-  deadline         DateTime?
-  estimatedMinutes Int?         @map("estimated_minutes")
-  scheduledStart   DateTime?    @map("scheduled_start")
-  scheduledEnd     DateTime?    @map("scheduled_end")
-  sourceModule     String       @default("manual") @map("source_module")
-  sourceEntityId   String?      @map("source_entity_id")
-  createdAt        DateTime     @default(now()) @map("created_at")
-  updatedAt        DateTime     @updatedAt @map("updated_at")
+  id                      String         @id @default(cuid()) @map("_id")
+  userId                  String         @map("user_id")
+  title                   String
+  description             String?
+  priority                TaskPriority   @default(MEDIUM)
+  status                  TaskStatus     @default(TODO)
+  deadline                DateTime?
+  estimatedMinutes        Int?           @map("estimated_minutes")
+  scheduledStart          DateTime?      @map("scheduled_start")
+  scheduledEnd            DateTime?      @map("scheduled_end")
+  schedulingMode          SchedulingMode @default(FIXED) @map("scheduling_mode")
+  timezone                String         @default("Asia/Taipei")
+  recurrenceRule          String?        @map("recurrence_rule")
+  seriesId                String?        @map("series_id")
+  originalOccurrenceStart DateTime?      @map("original_occurrence_start")
+  isRecurrenceException   Boolean        @default(false) @map("is_recurrence_exception")
+  isCancelled             Boolean        @default(false) @map("is_cancelled")
+  recurrenceEndAt         DateTime?      @map("recurrence_end_at")
+  recurrenceTimezone      String?        @map("recurrence_timezone")
+  aiConstraints           Json?          @map("ai_constraints")
+  scheduleReason          String?        @map("schedule_reason")
+  sourceModule            String         @default("manual") @map("source_module")
+  sourceEntityId          String?        @map("source_entity_id")
+  createdAt               DateTime       @default(now()) @map("created_at")
+  updatedAt               DateTime       @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

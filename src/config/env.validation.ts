@@ -1,5 +1,5 @@
 import { plainToInstance } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, validateSync } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsNumber, IsOptional, IsString, validateSync } from 'class-validator';
 
 enum NodeEnv {
   Development = 'development',
@@ -17,6 +17,7 @@ class EnvironmentVariables {
   API_PORT: number = 3000;
 
   @IsString()
+  @IsNotEmpty()
   MONGODB_URL: string = '';
 
   @IsString()
@@ -28,6 +29,7 @@ class EnvironmentVariables {
   REDIS_PORT: number = 6379;
 
   @IsString()
+  @IsNotEmpty()
   JWT_SECRET: string = '';
 
   @IsString()
