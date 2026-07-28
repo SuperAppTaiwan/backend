@@ -32,6 +32,11 @@ import {
   AcceptMealSuggestionDto,
   NearbyStoresDto,
   AddShoppingItemDto,
+  GetRecipesQueryDto,
+  ValidateRecipesDto,
+  AddRecipesDto,
+  AiSuggestMealDto,
+  SaveAiSuggestionDto,
 } from './dto/food.dto.js';
 
 @ApiTags('Food')
@@ -97,10 +102,14 @@ export class FoodController {
   // ─── Recipes ──────────────────────────────────────────────────────────────
 
   @Get('recipes')
-  @ApiOperation({ summary: 'List user recipes' })
-  @ApiResponse({ status: 200, description: 'All user recipes' })
-  getRecipes(@CurrentUser() user: AuthUser) {
-    return this.foodService.getRecipes(user.userId);
+  @ApiOperation({ summary: 'List user recipes — supports search/mealType filter and page/limit pagination' })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'mealType', required: false, enum: ['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK'] })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'User recipes — plain array unless page/limit given, otherwise a paginated envelope' })
+  getRecipes(@CurrentUser() user: AuthUser, @Query() query: GetRecipesQueryDto) {
+    return this.foodService.getRecipesFiltered(user.userId, query);
   }
 
   @Get('recipes/recommendations')
@@ -168,6 +177,36 @@ export class FoodController {
   @ApiResponse({ status: 200, description: 'Meal plan deleted' })
   deleteMealPlan(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.foodService.deleteMealPlan(user.userId, id);
+  }
+
+  // ─── Meal Plan v2: recipe picker + AI dedupe flow ────────────────────────────
+
+  @Post('meal-plans/validate-recipes')
+  @ApiOperation({ summary: 'Check whether selected recipes are nutritionally suitable for a meal slot; returns AI advice when they are not' })
+  @ApiResponse({ status: 200, description: 'Suitability result with warnings and AI advice' })
+  validateRecipes(@CurrentUser() user: AuthUser, @Body() dto: ValidateRecipesDto) {
+    return this.foodService.validateRecipesForMealPlan(user.userId, dto);
+  }
+
+  @Post('meal-plans/add-recipes')
+  @ApiOperation({ summary: 'Add one or more existing recipes to a meal slot without duplicating recipe records' })
+  @ApiResponse({ status: 201, description: 'Created meal items; duplicates already in this slot are skipped' })
+  addRecipes(@CurrentUser() user: AuthUser, @Body() dto: AddRecipesDto) {
+    return this.foodService.addRecipesToMealPlan(user.userId, dto);
+  }
+
+  @Post('meal-plans/ai-suggest')
+  @ApiOperation({ summary: 'AI: generate a meal suggestion for a slot, flagged with duplicateStatus against the user\'s own recipes' })
+  @ApiResponse({ status: 200, description: 'AI suggestions with duplicate detection — no recipe is created yet' })
+  aiSuggestMeals(@CurrentUser() user: AuthUser, @Body() dto: AiSuggestMealDto) {
+    return this.foodService.aiSuggestMeals(user.userId, dto);
+  }
+
+  @Post('meal-plans/save-ai-suggestion')
+  @ApiOperation({ summary: 'Save an AI meal suggestion — reuses an existing recipe if a duplicate is found, otherwise creates one' })
+  @ApiResponse({ status: 201, description: 'Recipe (created or reused) and updated meal plan' })
+  saveAiSuggestion(@CurrentUser() user: AuthUser, @Body() dto: SaveAiSuggestionDto) {
+    return this.foodService.saveAiSuggestion(user.userId, dto);
   }
 
   // ─── Shopping Lists ───────────────────────────────────────────────────────
@@ -248,6 +287,13 @@ export class FoodController {
   @ApiResponse({ status: 200, description: 'AI analysis result with detected ingredient info' })
   scanIngredient(@CurrentUser() user: AuthUser, @Body() dto: ScanIngredientDto) {
     return this.foodService.scanIngredient(user.userId, dto);
+  }
+
+  @Get('ingredients/barcode/:code')
+  @ApiOperation({ summary: 'Look up product info by barcode (EAN/UPC) via Open Food Facts' })
+  @ApiResponse({ status: 200, description: 'Product lookup result (found: false if not in database)' })
+  lookupBarcode(@Param('code') code: string) {
+    return this.foodService.lookupBarcode(code);
   }
 
   @Post('recipes/generate')
