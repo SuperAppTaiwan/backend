@@ -14,6 +14,10 @@ class EnvironmentVariables {
 
   @IsNumber()
   @IsOptional()
+  PORT: number = 3000;
+
+  @IsNumber()
+  @IsOptional()
   API_PORT: number = 3000;
 
   @IsString()
@@ -29,12 +33,32 @@ class EnvironmentVariables {
   REDIS_PORT: number = 6379;
 
   @IsString()
+  @IsOptional()
+  REDIS_PASSWORD: string = '';
+
+  @IsString()
   @IsNotEmpty()
   JWT_SECRET: string = '';
 
   @IsString()
   @IsOptional()
+  CORS_ORIGIN: string = '';
+
+  @IsString()
+  @IsOptional()
   GEMINI_API_KEY: string = '';
+
+  @IsString()
+  @IsOptional()
+  GEMINI_MODEL: string = '';
+
+  @IsString()
+  @IsOptional()
+  GROQ_API_KEY: string = '';
+
+  @IsString()
+  @IsOptional()
+  GROQ_MODEL: string = '';
 }
 
 export function validateEnv(config: Record<string, unknown>) {

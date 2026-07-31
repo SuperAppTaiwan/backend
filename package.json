@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "nest start --watch",
     "start": "node dist/main",
+    "start:prod": "node dist/main",
     "build": "nest build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
@@ -34,7 +36,9 @@
     "bcryptjs": "^3.0.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "compression": "^1.7.5",
     "expo-server-sdk": "^6.1.0",
+    "helmet": "^8.1.0",
     "luxon": "^3.7.2",
     "openai": "^6.44.0",
     "passport": "^0.7.0",
@@ -48,6 +52,7 @@
     "@nestjs/schematics": "^10.1.1",
     "@nestjs/testing": "^10.3.8",
     "@types/bcryptjs": "^3.0.0",
+    "@types/compression": "^1.7.5",
     "@types/express": "^4.17.21",
     "@types/jest": "^29.5.12",
     "@types/luxon": "^3.7.2",
@@ -82,5 +87,13 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@prisma/client",
+      "@prisma/engines",
+      "prisma"
+    ]
   }
 }
