@@ -297,6 +297,9 @@ model User {
   knowledgeBookmarks     KnowledgeBookmark[]
   pushTokens             PushToken[]
   conversations          Conversation[]
+  vocabCategories        VocabCategory[]
+  vocabWords             VocabWord[]
+  vocabReviewProgress    VocabReviewProgress[]
 
   @@map("users")
 }
@@ -590,6 +593,69 @@ model ReviewSession {
   vocabulary Vocabulary? @relation(fields: [vocabularyId], references: [id], onDelete: SetNull)
 
   @@map("review_sessions")
+}
+
+// ─── Personal vocabulary notebook ──────────────────────────────────────────
+// Additive, user-owned dictionary — separate from the legacy shared
+// Vocabulary/UserVocabularyProgress models above (which back the still-live
+// HSK plan / weekly report / legacy flashcard library screens and are left
+// untouched). Every VocabCategory/VocabWord/VocabReviewProgress row belongs
+// to exactly one user; there is no system-generated or shared vocabulary
+// here by design — the user is the only source of words.
+
+model VocabCategory {
+  id        String   @id @default(cuid()) @map("_id")
+  userId    String   @map("user_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  words VocabWord[]
+
+  @@unique([userId, name])
+  @@map("vocab_categories")
+}
+
+model VocabWord {
+  id                String   @id @default(cuid()) @map("_id")
+  userId            String   @map("user_id")
+  categoryId        String?  @map("category_id")
+  simplified        String
+  simplifiedPinyin  String   @map("simplified_pinyin")
+  traditional       String?
+  traditionalPinyin String?  @map("traditional_pinyin")
+  meaningVi         String   @map("meaning_vi")
+  example           String?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category VocabCategory?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  progress VocabReviewProgress?
+
+  @@index([userId])
+  @@index([categoryId])
+  @@map("vocab_words")
+}
+
+model VocabReviewProgress {
+  id             String           @id @default(cuid()) @map("_id")
+  userId         String           @map("user_id")
+  vocabWordId    String           @unique @map("vocab_word_id")
+  status         VocabularyStatus @default(NEW)
+  familiarity    Int              @default(0)
+  reviewCount    Int              @default(0) @map("review_count")
+  lastReviewedAt DateTime?        @map("last_reviewed_at")
+  nextReviewAt   DateTime?        @map("next_review_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  word VocabWord @relation(fields: [vocabWordId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("vocab_review_progress")
 }
 
 // ─── Schedule ────────────────────────────────────────────────────────────────

@@ -126,25 +126,6 @@ describe('LearningService', () => {
     });
   });
 
-  describe('markLearned', () => {
-    it('upserts progress and publishes VOCABULARY_LEARNED event', async () => {
-      (prisma.vocabulary.findUnique as jest.Mock).mockResolvedValue(mockVocab());
-      (prisma.userVocabularyProgress.upsert as jest.Mock).mockResolvedValue(mockProgress({ status: 'LEARNED' }));
-
-      const result = await service.markLearned('u1', 'v1');
-
-      expect(result.status).toBe('LEARNED');
-      expect(eventsService.publish).toHaveBeenCalledWith(
-        expect.objectContaining({ eventType: EventType.VOCABULARY_LEARNED }),
-      );
-    });
-
-    it('throws NotFoundException for unknown vocabulary', async () => {
-      (prisma.vocabulary.findUnique as jest.Mock).mockResolvedValue(null);
-      await expect(service.markLearned('u1', 'missing')).rejects.toThrow(NotFoundException);
-    });
-  });
-
   describe('submitReview', () => {
     it('updates progress with correct nextReviewAt for GOOD result', async () => {
       (prisma.vocabulary.findUnique as jest.Mock).mockResolvedValue(mockVocab());

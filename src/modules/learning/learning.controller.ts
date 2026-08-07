@@ -72,18 +72,6 @@ export class LearningController {
     return this.learningService.deleteVocabulary(user.userId, id);
   }
 
-  @Post('vocabularies/:id/learned')
-  @ApiOperation({ summary: 'Mark vocabulary as learned' })
-  markLearned(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.learningService.markLearned(user.userId, id);
-  }
-
-  @Post('vocabularies/:id/bookmark')
-  @ApiOperation({ summary: 'Bookmark vocabulary for active learning' })
-  bookmark(@CurrentUser() user: AuthUser, @Param('id') id: string) {
-    return this.learningService.bookmarkVocabulary(user.userId, id);
-  }
-
   // ─── Review ──────────────────────────────────────────────────────────────────
 
   @Post('review')

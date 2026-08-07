@@ -9,6 +9,7 @@ import { ProfileModule } from './modules/profile/profile.module.js';
 import { FinanceModule } from './modules/finance/finance.module.js';
 import { GoalsModule } from './modules/goals/goals.module.js';
 import { LearningModule } from './modules/learning/learning.module.js';
+import { VocabNotebookModule } from './modules/vocab-notebook/vocab-notebook.module.js';
 import { ScheduleModule } from './modules/schedule/schedule.module.js';
 import { AIModule } from './modules/ai/ai.module.js';
 import { NotificationsModule } from './modules/notifications/notifications.module.js';
@@ -29,6 +30,7 @@ import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
     FinanceModule,
     GoalsModule,
     LearningModule,
+    VocabNotebookModule,
     ScheduleModule,
     AIModule,
     NotificationsModule,

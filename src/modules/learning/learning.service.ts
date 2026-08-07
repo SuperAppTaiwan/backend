@@ -176,46 +176,6 @@ export class LearningService {
     return { words: combined, totalDue: combined.length, isDue: dueReview.length > 0 };
   }
 
-  // ─── Mark learned / bookmark ─────────────────────────────────────────────────
-
-  async markLearned(userId: string, vocabularyId: string) {
-    const vocab = await this.prisma.vocabulary.findUnique({ where: { id: vocabularyId } });
-    if (!vocab) throw new NotFoundException('Vocabulary not found');
-
-    const progress = await this.prisma.userVocabularyProgress.upsert({
-      where: { userId_vocabularyId: { userId, vocabularyId } },
-      create: {
-        userId, vocabularyId, status: 'LEARNED', familiarity: 5,
-        learnedAt: new Date(), nextReviewAt: new Date(Date.now() + 4 * 86400_000),
-      },
-      update: {
-        status: 'LEARNED', learnedAt: new Date(),
-        nextReviewAt: new Date(Date.now() + 4 * 86400_000),
-      },
-    });
-
-    await this.events.publish({
-      userId,
-      eventType: EventType.VOCABULARY_LEARNED,
-      sourceModule: 'learning',
-      payload: { vocabularyId, traditional: vocab.traditional },
-    });
-
-    return progress;
-  }
-
-  async bookmarkVocabulary(userId: string, vocabularyId: string) {
-    const vocab = await this.prisma.vocabulary.findUnique({ where: { id: vocabularyId } });
-    if (!vocab) throw new NotFoundException('Vocabulary not found');
-
-    const progress = await this.prisma.userVocabularyProgress.upsert({
-      where: { userId_vocabularyId: { userId, vocabularyId } },
-      create: { userId, vocabularyId, status: 'LEARNING', nextReviewAt: new Date() },
-      update: { status: 'LEARNING' },
-    });
-    return progress;
-  }
-
   // ─── Review ──────────────────────────────────────────────────────────────────
 
   async submitReview(userId: string, dto: ReviewDto) {
