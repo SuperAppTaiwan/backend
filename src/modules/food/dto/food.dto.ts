@@ -5,6 +5,7 @@ import {
   IsDateString,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
@@ -484,6 +485,7 @@ export class ToggleShoppingItemDto {
 export class ScanIngredientDto {
   @ApiProperty({ description: 'Base64 encoded image (no data URI prefix needed, but supported)' })
   @IsString()
+  @IsNotEmpty()
   declare imageBase64: string;
 
   @ApiPropertyOptional({ description: 'MIME type: image/jpeg or image/png' })

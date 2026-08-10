@@ -11,7 +11,7 @@ export class GeminiAIProvider implements AIProvider {
 
   constructor(private readonly config: ConfigService) {
     this.apiKey = this.config.get<string>('GEMINI_API_KEY') || undefined;
-    this.model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-2.0-flash';
+    this.model = this.config.get<string>('GEMINI_MODEL') ?? 'gemini-flash-latest';
   }
 
   isAvailable(): boolean { return Boolean(this.apiKey); }

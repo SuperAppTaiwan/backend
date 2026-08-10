@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { ExpenseCategoryType, FoodCategory, PaymentMethod, Prisma, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
-import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
+import { AIProviderChain, VisionUnavailableError } from '../ai/providers/ai-provider-chain.service.js';
 import { UserHealthContextService } from '../profile/user-health-context.service.js';
 import { buildHealthAwareRecipePrompt, buildHealthAwareMealPrompt } from './prompts/health-aware-prompt.builder.js';
 
@@ -44,6 +44,28 @@ export interface StoreResult {
   phone: string | null;
   mapsUrl: string;
   osmUrl: string;
+}
+
+// `fallback`/`aiError` are mutually exclusive with a genuine AI verdict and
+// with each other: `fallback` means no vision provider is configured at all,
+// `aiError` means one is configured but the request itself failed. Neither
+// may ever be conflated with a real `isFood: false` read of the image.
+export interface IngredientScanResult {
+  isFood: boolean;
+  name: string;
+  nameVi: string;
+  category: FoodCategory;
+  quantity: number | null;
+  unit: UnitOfMeasure;
+  ocrExpiryText: string | null;
+  expiryDate: string | null;
+  expirySource: string;
+  freshnessStatus: string | null;
+  estimatedDaysRemaining: number | null;
+  aiConfidence: number;
+  reason: string;
+  fallback?: boolean;
+  aiError?: boolean;
 }
 import type {
   CreateIngredientDto,
@@ -99,6 +121,41 @@ export class FoodService {
       if (match) return match;
     }
     return fallback;
+  }
+
+  // The scan prompt asks for a 0-100 confidence, but vision models occasionally
+  // drift to a 0-1 fraction instead — normalize defensively rather than trust
+  // the raw value blindly (the frontend renders this directly as `${x}%`).
+  private normalizeConfidence(value: unknown): number {
+    const n = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    const scaled = n > 0 && n <= 1 ? n * 100 : n;
+    return Math.max(0, Math.min(100, Math.round(scaled)));
+  }
+
+  // Shared shape for a scan result that could not be produced by a genuine AI
+  // read of the image — either the AI stack is unavailable at all (`fallback`)
+  // or a vision-capable provider was configured but the actual attempt failed
+  // (`aiError`, e.g. quota/network/malformed response). Both are distinct from
+  // a real `isFood: false` verdict and must never render as "no food detected".
+  private emptyIngredientScanResult(reason: string, flag: 'fallback' | 'aiError'): IngredientScanResult {
+    return {
+      isFood: false,
+      name: '',
+      nameVi: '',
+      category: FoodCategory.OTHER,
+      quantity: null,
+      unit: UnitOfMeasure.PIECE,
+      ocrExpiryText: null,
+      expiryDate: null,
+      expirySource: 'manual',
+      freshnessStatus: null,
+      estimatedDaysRemaining: null,
+      aiConfidence: 0,
+      reason,
+      fallback: flag === 'fallback' ? true : undefined,
+      aiError: flag === 'aiError' ? true : undefined,
+    };
   }
 
   // ─── Recipe duplicate detection ────────────────────────────────────────────
@@ -854,7 +911,7 @@ Write ONE short, friendly Vietnamese sentence of practical advice (max 40 words)
 
   // ─── AI: Ingredient Camera Scan ───────────────────────────────────────────
 
-  async scanIngredient(userId: string, dto: ScanIngredientDto) {
+  async scanIngredient(userId: string, dto: ScanIngredientDto): Promise<IngredientScanResult> {
     const mimeType = dto.mimeType ?? 'image/jpeg';
     // Strip data URI prefix if present
     const base64 = dto.imageBase64.replace(/^data:image\/\w+;base64,/, '');
@@ -880,33 +937,54 @@ Analyze this image and return:
 
 If the image is NOT food-related (e.g. a person, furniture, random object), set isFood to false and fill other fields with null/"OTHER".`;
 
-    const raw = await this.aiChain.generateTextWithVision(base64, mimeType, prompt);
-
-    // Deterministic fallback when no API key
-    if (!raw) {
-      return {
-        isFood: false,
-        name: '',
-        nameVi: '',
-        category: 'OTHER',
-        quantity: null,
-        unit: 'PIECE',
-        ocrExpiryText: null,
-        expiryDate: null,
-        expirySource: 'manual',
-        freshnessStatus: null,
-        estimatedDaysRemaining: null,
-        aiConfidence: 0,
-        reason: 'AI không khả dụng. Vui lòng nhập thủ công.',
-        fallback: true,
-      };
+    let raw: string;
+    try {
+      raw = await this.aiChain.generateTextWithVision(base64, mimeType, prompt);
+    } catch (err) {
+      if (err instanceof VisionUnavailableError) {
+        // A vision-capable provider was configured but the actual attempt
+        // failed (quota exhausted, network error, invalid key, ...). This is
+        // a processing error, not a verdict — never label it "no food".
+        this.logger.warn(`Ingredient scan: vision request failed — ${err.message}`);
+        return this.emptyIngredientScanResult('Đã xảy ra lỗi khi phân tích ảnh. Vui lòng thử lại.', 'aiError');
+      }
+      throw err;
     }
 
-    const result = this.safeJson<Record<string, unknown>>(raw, { isFood: false, aiConfidence: 0, reason: 'Không thể phân tích ảnh' });
+    // No vision provider configured at all — genuine AI-unavailable case.
+    if (!raw) {
+      return this.emptyIngredientScanResult('AI không khả dụng. Vui lòng nhập thủ công.', 'fallback');
+    }
+
+    let result: Record<string, unknown> | null;
+    try {
+      const match = raw.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+      result = JSON.parse(match ? match[0] : raw) as Record<string, unknown>;
+    } catch {
+      result = null;
+    }
+
+    if (result === null) {
+      // The AI responded, but not with parseable JSON — a processing error,
+      // not a genuine "not food" read of the image.
+      this.logger.warn('Ingredient scan: failed to parse AI response as JSON');
+      return this.emptyIngredientScanResult('Không thể phân tích phản hồi từ AI. Vui lòng thử lại.', 'aiError');
+    }
+
     return {
-      ...result,
+      isFood: Boolean(result.isFood),
+      name: typeof result.name === 'string' ? result.name : '',
+      nameVi: typeof result.nameVi === 'string' ? result.nameVi : '',
       category: this.normalizeEnumValue(result.category, Object.values(FoodCategory), FoodCategory.OTHER),
+      quantity: typeof result.quantity === 'number' ? result.quantity : null,
       unit: this.normalizeEnumValue(result.unit, Object.values(UnitOfMeasure), UnitOfMeasure.PIECE),
+      ocrExpiryText: typeof result.ocrExpiryText === 'string' ? result.ocrExpiryText : null,
+      expiryDate: typeof result.expiryDate === 'string' ? result.expiryDate : null,
+      expirySource: typeof result.expirySource === 'string' ? result.expirySource : 'manual',
+      freshnessStatus: typeof result.freshnessStatus === 'string' ? result.freshnessStatus : null,
+      estimatedDaysRemaining: typeof result.estimatedDaysRemaining === 'number' ? result.estimatedDaysRemaining : null,
+      aiConfidence: this.normalizeConfidence(result.aiConfidence),
+      reason: typeof result.reason === 'string' ? result.reason : '',
     };
   }
 

@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { FoodService } from './food.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
-import { AIProviderChain } from '../ai/providers/ai-provider-chain.service.js';
+import { AIProviderChain, VisionUnavailableError } from '../ai/providers/ai-provider-chain.service.js';
 import { UserHealthContextService } from '../profile/user-health-context.service.js';
 import { FoodCategory, MealType, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 
@@ -1111,6 +1111,110 @@ describe('FoodService', () => {
 
       expect(result.unit).toBe(UnitOfMeasure.LITER);
       expect(result.category).toBe(FoodCategory.DAIRY);
+    });
+
+    it('detects a real ingredient from a well-formed AI response (e.g. apple)', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({
+          isFood: true,
+          name: 'Apple',
+          nameVi: 'Táo',
+          category: 'FRUIT',
+          quantity: 3,
+          unit: 'PIECE',
+          aiConfidence: 95,
+          reason: 'Three red apples on a wooden table.',
+        }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(true);
+      expect(result.nameVi).toBe('Táo');
+      expect(result.aiConfidence).toBe(95);
+      expect(result.fallback).toBeUndefined();
+      expect((result as { aiError?: boolean }).aiError).toBeUndefined();
+    });
+
+    it('handles a ```json-fenced AI response (Gemini does not always honor "no markdown")', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        '```json\n' + JSON.stringify({ isFood: true, name: 'Banana', category: 'FRUIT' }) + '\n```',
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(true);
+      expect(result.name).toBe('Banana');
+    });
+
+    it('returns a genuine, unflagged NO_FOOD result when the AI explicitly says isFood: false', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({ isFood: false, reason: 'The image shows a laptop, not food.' }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(false);
+      expect(result.fallback).toBeUndefined();
+      expect((result as { aiError?: boolean }).aiError).toBeUndefined();
+    });
+
+    it('normalizes a 0-1 scale confidence to 0-100 (provider scale drift)', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({ isFood: true, name: 'Egg', aiConfidence: 0.95 }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.aiConfidence).toBe(95);
+    });
+
+    it('passes through an already 0-100 scale confidence unchanged', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue(
+        JSON.stringify({ isFood: true, name: 'Egg', aiConfidence: 95 }),
+      );
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.aiConfidence).toBe(95);
+    });
+
+    it('marks the result fallback:true (AI unavailable) when no vision provider is configured at all', async () => {
+      aiChain.generateTextWithVision.mockResolvedValue('');
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(false);
+      expect(result.fallback).toBe(true);
+      expect((result as { aiError?: boolean }).aiError).toBeUndefined();
+    });
+
+    it('marks the result aiError:true (NOT no-food) when the vision request itself fails (quota/network/etc)', async () => {
+      aiChain.generateTextWithVision.mockRejectedValue(new VisionUnavailableError('429 quota exceeded'));
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(false);
+      expect(result.aiError).toBe(true);
+      expect(result.fallback).toBeUndefined();
+    });
+
+    it('marks the result aiError:true (NOT no-food) when the AI responds with unparseable text', async () => {
+      // e.g. the deterministic provider's random non-JSON wellness tip, if it
+      // were ever reached for this endpoint, or a genuinely malformed AI reply.
+      aiChain.generateTextWithVision.mockResolvedValue('Hãy uống đủ nước mỗi ngày.');
+
+      const result = await service.scanIngredient(USER_ID, { imageBase64: 'abc123' });
+
+      expect(result.isFood).toBe(false);
+      expect(result.aiError).toBe(true);
+      expect(result.fallback).toBeUndefined();
+    });
+
+    it('re-throws an unexpected (non-vision) error from the AI chain instead of swallowing it', async () => {
+      aiChain.generateTextWithVision.mockRejectedValue(new Error('unexpected boom'));
+
+      await expect(service.scanIngredient(USER_ID, { imageBase64: 'abc123' })).rejects.toThrow('unexpected boom');
     });
   });
 

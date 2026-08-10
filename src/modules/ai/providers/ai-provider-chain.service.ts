@@ -3,6 +3,19 @@ import type { AIProvider, AIChatMessage, AIChatResponse, AISummaryInput, AISumma
 
 export const AI_PROVIDERS = 'AI_PROVIDERS';
 
+// Thrown by generateTextWithVision when at least one vision-capable provider
+// is configured but every attempt genuinely failed (quota, network, invalid
+// key, malformed response, etc). Callers MUST treat this as a processing
+// error, never as a "no food"/"nothing detected" verdict — the model never
+// actually saw the image. Distinct from the "no vision provider configured
+// at all" case, which still resolves to '' (existing AI-unavailable path).
+export class VisionUnavailableError extends Error {
+  constructor(message = 'Vision request failed') {
+    super(message);
+    this.name = 'VisionUnavailableError';
+  }
+}
+
 function isRateLimitError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes('429') || /rate.?limit|quota.?exceed/i.test(msg);
@@ -86,15 +99,35 @@ export class AIProviderChain {
   }
 
   async generateTextWithVision(imageBase64: string, mimeType: string, prompt: string): Promise<string> {
+    let visionProviderConfigured = false;
+    let lastError: unknown;
+
     for (const provider of this.providers) {
-      if (!this.isReady(provider) || !provider.supportsVision()) continue;
+      if (!provider.supportsVision()) continue;
+      visionProviderConfigured = true;
+      if (!this.isReady(provider)) continue;
       try {
         return await provider.generateTextWithVision(imageBase64, mimeType, prompt);
       } catch (err) {
+        lastError = err;
         this.handleError(provider, err, 'generateTextWithVision');
       }
     }
-    // No vision provider available — degrade to text-only
-    return this.generateText(prompt);
+
+    if (!visionProviderConfigured) {
+      // No vision-capable provider exists at all (e.g. no Gemini key configured) —
+      // this is the genuine "AI unavailable" case; callers already handle an
+      // empty string as such.
+      return '';
+    }
+
+    // A vision-capable provider IS configured but every attempt failed (quota,
+    // network, invalid key, ...). Never silently degrade to a text-only guess
+    // about an image the model never received — that produces a fabricated,
+    // ungrounded "result" indistinguishable from a genuine answer. Surface a
+    // real, catchable error instead.
+    throw new VisionUnavailableError(
+      lastError instanceof Error ? lastError.message : 'Vision request failed',
+    );
   }
 }
