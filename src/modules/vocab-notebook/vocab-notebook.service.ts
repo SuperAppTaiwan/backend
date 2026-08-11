@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { VocabularyStatus } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
@@ -239,18 +240,23 @@ export class VocabNotebookService {
 
     const count = dto.count ?? DEFAULT_REVIEW_COUNT;
     const selected = selectReviewWords(words, count);
+    // Minted fresh per session and handed back to the client, which echoes it
+    // on every /review/submit call in this session — lets selectReviewWords
+    // identify "words from the immediately previous session" on the next
+    // startReview without a dedicated session-history table.
+    const sessionId = randomUUID();
 
     await this.events.publish({
       userId,
       eventType: EventType.VOCAB_REVIEW_SESSION_STARTED,
       sourceModule: 'vocab-notebook',
-      payload: { categoryId: dto.categoryId ?? null, requested: count, selected: selected.length },
+      payload: { categoryId: dto.categoryId ?? null, requested: count, selected: selected.length, sessionId },
     });
 
-    return { words: selected };
+    return { words: selected, sessionId };
   }
 
-  async submitWordReview(userId: string, vocabWordId: string) {
+  async submitWordReview(userId: string, vocabWordId: string, sessionId?: string) {
     const word = await this.prisma.vocabWord.findFirst({ where: { id: vocabWordId, userId } });
     if (!word) throw new NotFoundException('Vocabulary word not found');
 
@@ -262,6 +268,7 @@ export class VocabNotebookService {
     const status = nextReviewStatus(reviewCount);
     const nextReviewAt = new Date();
     nextReviewAt.setDate(nextReviewAt.getDate() + nextReviewIntervalDays(reviewCount));
+    const lastReviewSessionId = sessionId ?? null;
 
     const progress = await this.prisma.vocabReviewProgress.upsert({
       where: { vocabWordId },
@@ -273,6 +280,7 @@ export class VocabNotebookService {
         reviewCount: 1,
         lastReviewedAt: new Date(),
         nextReviewAt,
+        lastReviewSessionId,
       },
       update: {
         status,
@@ -280,6 +288,7 @@ export class VocabNotebookService {
         reviewCount: { increment: 1 },
         lastReviewedAt: new Date(),
         nextReviewAt,
+        lastReviewSessionId,
       },
     });
 

@@ -21,4 +21,12 @@ export class SubmitWordReviewDto {
   @ApiPropertyOptional({ example: 'clxyz123' })
   @IsString()
   declare vocabWordId: string;
+
+  @ApiPropertyOptional({
+    example: 'a1b2c3d4-...',
+    description: 'The sessionId returned by /review/start for this review session, used to deprioritize this word on the next session.',
+  })
+  @IsOptional()
+  @IsString()
+  declare sessionId?: string;
 }

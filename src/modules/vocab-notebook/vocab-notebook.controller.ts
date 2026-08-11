@@ -102,6 +102,6 @@ export class VocabNotebookController {
   @Post('review/submit')
   @ApiOperation({ summary: 'Record that a word was reviewed in the current session' })
   submitWordReview(@CurrentUser() user: AuthUser, @Body() dto: SubmitWordReviewDto) {
-    return this.service.submitWordReview(user.userId, dto.vocabWordId);
+    return this.service.submitWordReview(user.userId, dto.vocabWordId, dto.sessionId);
   }
 }

@@ -187,6 +187,16 @@ describe('VocabNotebookService', () => {
 
       expect(result.words).toHaveLength(2);
     });
+
+    it('mints a fresh sessionId for every call, so the previous session can later be identified', async () => {
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([mockWord({ id: 'w1' })]);
+
+      const first = await service.startReview('u1', {});
+      const second = await service.startReview('u1', {});
+
+      expect(typeof first.sessionId).toBe('string');
+      expect(first.sessionId).not.toBe(second.sessionId);
+    });
   });
 
   describe('submitWordReview', () => {
@@ -221,6 +231,24 @@ describe('VocabNotebookService', () => {
       const result = await service.submitWordReview('u1', 'w1');
 
       expect(result.status).not.toBe(VocabularyStatus.LEARNED);
+    });
+
+    it('persists the sessionId onto progress, for the next startReview to deprioritize', async () => {
+      (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(mockWord());
+      (prisma.vocabReviewProgress.findUnique as jest.Mock).mockResolvedValue(null);
+      (prisma.vocabReviewProgress.upsert as jest.Mock).mockImplementation(({ create }) => ({
+        ...create,
+        id: 'p1',
+      }));
+
+      await service.submitWordReview('u1', 'w1', 'session-abc');
+
+      expect(prisma.vocabReviewProgress.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({ lastReviewSessionId: 'session-abc' }),
+          update: expect.objectContaining({ lastReviewSessionId: 'session-abc' }),
+        }),
+      );
     });
   });
 });

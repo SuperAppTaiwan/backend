@@ -640,16 +640,21 @@ model VocabWord {
 }
 
 model VocabReviewProgress {
-  id             String           @id @default(cuid()) @map("_id")
-  userId         String           @map("user_id")
-  vocabWordId    String           @unique @map("vocab_word_id")
-  status         VocabularyStatus @default(NEW)
-  familiarity    Int              @default(0)
-  reviewCount    Int              @default(0) @map("review_count")
-  lastReviewedAt DateTime?        @map("last_reviewed_at")
-  nextReviewAt   DateTime?        @map("next_review_at")
-  createdAt      DateTime         @default(now()) @map("created_at")
-  updatedAt      DateTime         @updatedAt @map("updated_at")
+  id                 String           @id @default(cuid()) @map("_id")
+  userId             String           @map("user_id")
+  vocabWordId        String           @unique @map("vocab_word_id")
+  status             VocabularyStatus @default(NEW)
+  familiarity        Int              @default(0)
+  reviewCount        Int              @default(0) @map("review_count")
+  lastReviewedAt     DateTime?        @map("last_reviewed_at")
+  nextReviewAt       DateTime?        @map("next_review_at")
+  // Identifies which review/practice session (see VocabNotebookService.startReview)
+  // this word was most recently reviewed in — used by selectReviewWords to give
+  // the immediately-previous session's words the lowest reselection priority
+  // without needing a separate session-history table.
+  lastReviewSessionId String?         @map("last_review_session_id")
+  createdAt          DateTime         @default(now()) @map("created_at")
+  updatedAt          DateTime         @updatedAt @map("updated_at")
 
   user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   word VocabWord @relation(fields: [vocabWordId], references: [id], onDelete: Cascade)
