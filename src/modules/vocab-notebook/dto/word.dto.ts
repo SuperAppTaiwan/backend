@@ -39,6 +39,18 @@ export class CreateVocabWordDto {
   @MaxLength(500)
   declare example?: string;
 
+  @ApiPropertyOptional({ example: 'Wǒ měitiān gōngzuò bā gè xiǎoshí.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare examplePinyin?: string;
+
+  @ApiPropertyOptional({ example: 'Tôi làm việc tám tiếng mỗi ngày.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  declare exampleVietnamese?: string;
+
   @ApiPropertyOptional({ example: 'clxyz123' })
   @IsOptional()
   @IsString()
@@ -89,6 +101,16 @@ export class BulkVocabWordItemDto {
   @IsOptional()
   @IsString()
   declare example?: string;
+
+  @ApiPropertyOptional({ example: 'Wǒ měitiān gōngzuò bā gè xiǎoshí.' })
+  @IsOptional()
+  @IsString()
+  declare examplePinyin?: string;
+
+  @ApiPropertyOptional({ example: 'Tôi làm việc tám tiếng mỗi ngày.' })
+  @IsOptional()
+  @IsString()
+  declare exampleVietnamese?: string;
 
   @ApiPropertyOptional({ example: 'clxyz123' })
   @IsOptional()

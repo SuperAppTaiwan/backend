@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ReviewResult, VocabularyStatus } from '@prisma/client';
 import { VocabNotebookService } from './vocab-notebook.service.js';
@@ -164,6 +164,96 @@ describe('VocabNotebookService', () => {
         data: { categoryId: null },
       });
       expect(prisma.vocabCategory.delete).toHaveBeenCalledWith({ where: { id: 'cat1' } });
+    });
+
+    // Regression: MinLength(1) alone accepts a whitespace-only DTO name (e.g.
+    // "   ", length 3) since it validates the raw string before the service
+    // trims it — reproduced live against the real backend (HTTP 201, name:
+    // ""). This is the service-layer half of that fix; the DTO's
+    // @Matches(/\S/) is the other half (see category.dto.ts / its own spec).
+    it('rejects creating a category whose name is only whitespace, even if it slipped past DTO validation', async () => {
+      await expect(service.createCategory('u1', { name: '   ' })).rejects.toThrow(BadRequestException);
+      expect(prisma.vocabCategory.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects renaming a category to a whitespace-only name', async () => {
+      (prisma.vocabCategory.findFirst as jest.Mock).mockResolvedValue(mockCategory());
+
+      await expect(service.updateCategory('u1', 'cat1', { name: '   ' })).rejects.toThrow(BadRequestException);
+      expect(prisma.vocabCategory.update).not.toHaveBeenCalled();
+    });
+
+    it('allows updateCategory to touch other fields without requiring name', async () => {
+      (prisma.vocabCategory.findFirst as jest.Mock).mockResolvedValue(mockCategory());
+      (prisma.vocabCategory.update as jest.Mock).mockResolvedValue(mockCategory());
+
+      await expect(service.updateCategory('u1', 'cat1', {})).resolves.toBeDefined();
+      expect(prisma.vocabCategory.update).toHaveBeenCalledWith({ where: { id: 'cat1' }, data: {} });
+    });
+  });
+
+  // ─── Traditional fallback normalization (single-word create/update) ────────
+  // Same normalizeTraditionalFields() used by bulkCreateWords — see its own
+  // spec file for the pure-function cases; these confirm the service actually
+  // wires it in for both create and update.
+
+  describe('createWord — Traditional fallback', () => {
+    it('falls back Traditional/TraditionalPinyin to Simplified when left blank, honoring the Add Vocabulary form\'s own hint text', async () => {
+      (prisma.vocabWord.create as jest.Mock).mockImplementation(({ data }) => ({ ...data, id: 'w1' }));
+
+      const result = await service.createWord('u1', {
+        simplified: '电影', simplifiedPinyin: 'diànyǐng', meaningVi: 'phim',
+      });
+
+      expect(result.traditional).toBe('电影');
+      expect(result.traditionalPinyin).toBe('diànyǐng');
+    });
+
+    it('preserves an explicitly different Traditional value', async () => {
+      (prisma.vocabWord.create as jest.Mock).mockImplementation(({ data }) => ({ ...data, id: 'w1' }));
+
+      const result = await service.createWord('u1', {
+        simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu', traditional: '愛', traditionalPinyin: 'ài',
+      });
+
+      expect(result.traditional).toBe('愛');
+    });
+
+    it('persists example pinyin and Vietnamese example translation', async () => {
+      (prisma.vocabWord.create as jest.Mock).mockImplementation(({ data }) => ({ ...data, id: 'w1' }));
+
+      const result = await service.createWord('u1', {
+        simplified: '电影', simplifiedPinyin: 'diànyǐng', meaningVi: 'phim',
+        example: '我喜欢看电影。', examplePinyin: 'Wǒ xǐhuān kàn diànyǐng.', exampleVietnamese: 'Tôi thích xem phim.',
+      });
+
+      expect(result.examplePinyin).toBe('Wǒ xǐhuān kàn diànyǐng.');
+      expect(result.exampleVietnamese).toBe('Tôi thích xem phim.');
+    });
+  });
+
+  describe('updateWord — Traditional fallback', () => {
+    it('falls back to Simplified when Traditional is cleared to blank in an edit', async () => {
+      (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(
+        mockWord({ simplified: '电影', simplifiedPinyin: 'diànyǐng', traditional: '電影', traditionalPinyin: 'diànyǐng' }),
+      );
+      (prisma.vocabWord.update as jest.Mock).mockImplementation(({ data }) => data);
+
+      const result = await service.updateWord('u1', 'w1', { traditional: '', traditionalPinyin: '' });
+
+      expect(result.traditional).toBe('电影');
+      expect(result.traditionalPinyin).toBe('diànyǐng');
+    });
+
+    it('does not touch Traditional when the edit does not mention it', async () => {
+      (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(
+        mockWord({ simplified: '爱', traditional: '愛' }),
+      );
+      (prisma.vocabWord.update as jest.Mock).mockImplementation(({ data }) => data);
+
+      const result = await service.updateWord('u1', 'w1', { meaningVi: 'yêu (updated)' });
+
+      expect(result).not.toHaveProperty('traditional');
     });
   });
 
@@ -428,6 +518,54 @@ describe('VocabNotebookService', () => {
 
       expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
         data: [expect.objectContaining({ userId: 'u1' })],
+      });
+    });
+
+    it('falls back Traditional/TraditionalPinyin to Simplified when a row omits them (identical-form words, e.g. 电影)', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      await service.bulkCreateWords('u1', [
+        { simplified: '电影', simplifiedPinyin: 'diànyǐng', meaningVi: 'phim' },
+      ]);
+
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ traditional: '电影', traditionalPinyin: 'diànyǐng' })],
+      });
+    });
+
+    it('preserves an explicitly different Traditional value supplied in a bulk row', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      await service.bulkCreateWords('u1', [
+        { simplified: '车', simplifiedPinyin: 'chē', traditional: '車', traditionalPinyin: 'chē', meaningVi: 'xe' },
+      ]);
+
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ traditional: '車', traditionalPinyin: 'chē' })],
+      });
+    });
+
+    it('persists example pinyin and Vietnamese example translation for a bulk row', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      await service.bulkCreateWords('u1', [
+        {
+          simplified: '电影', simplifiedPinyin: 'diànyǐng', meaningVi: 'phim',
+          example: '我喜欢看电影。', examplePinyin: 'Wǒ xǐhuān kàn diànyǐng.', exampleVietnamese: 'Tôi thích xem phim.',
+        },
+      ]);
+
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({
+          examplePinyin: 'Wǒ xǐhuān kàn diànyǐng.',
+          exampleVietnamese: 'Tôi thích xem phim.',
+        })],
       });
     });
   });

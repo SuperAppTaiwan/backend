@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, ReviewResult, VocabularyStatus } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
@@ -7,6 +7,7 @@ import { CreateVocabCategoryDto, UpdateVocabCategoryDto } from './dto/category.d
 import { BulkVocabWordItemDto, CreateVocabWordDto, UpdateVocabWordDto } from './dto/word.dto.js';
 import { StartReviewDto } from './dto/review.dto.js';
 import { selectReviewWords } from './review-selection.js';
+import { normalizeTraditionalFields } from './vocab-word-normalization.js';
 import {
   nextFamiliarityFromResult,
   nextReviewIntervalDays,
@@ -50,6 +51,10 @@ export class VocabNotebookService {
 
   async createCategory(userId: string, dto: CreateVocabCategoryDto) {
     const name = dto.name.trim();
+    // Belt-and-suspenders alongside the DTO's @Matches(/\S/) — never persist
+    // a blank category name (it renders as an empty, unusable filter chip).
+    if (!name) throw new BadRequestException('Category name must not be blank');
+
     const existing = await this.prisma.vocabCategory.findFirst({ where: { userId, name } });
     if (existing) return existing;
 
@@ -67,9 +72,14 @@ export class VocabNotebookService {
     const category = await this.prisma.vocabCategory.findFirst({ where: { id, userId } });
     if (!category) throw new NotFoundException('Category not found');
 
+    const trimmedName = dto.name?.trim();
+    if (dto.name !== undefined && !trimmedName) {
+      throw new BadRequestException('Category name must not be blank');
+    }
+
     const updated = await this.prisma.vocabCategory.update({
       where: { id },
-      data: { name: dto.name?.trim() },
+      data: { ...(trimmedName !== undefined && { name: trimmedName }) },
     });
     await this.events.publish({
       userId,
@@ -137,15 +147,23 @@ export class VocabNotebookService {
       await this.assertOwnsCategory(userId, dto.categoryId);
     }
 
+    const simplified = dto.simplified.trim();
+    const simplifiedPinyin = dto.simplifiedPinyin.trim();
+    const { traditional, traditionalPinyin } = normalizeTraditionalFields({
+      simplified, simplifiedPinyin, traditional: dto.traditional, traditionalPinyin: dto.traditionalPinyin,
+    });
+
     const word = await this.prisma.vocabWord.create({
       data: {
         userId,
-        simplified: dto.simplified.trim(),
-        simplifiedPinyin: dto.simplifiedPinyin.trim(),
-        traditional: dto.traditional?.trim() || null,
-        traditionalPinyin: dto.traditionalPinyin?.trim() || null,
+        simplified,
+        simplifiedPinyin,
+        traditional,
+        traditionalPinyin,
         meaningVi: dto.meaningVi.trim(),
         example: dto.example?.trim() || null,
+        examplePinyin: dto.examplePinyin?.trim() || null,
+        exampleVietnamese: dto.exampleVietnamese?.trim() || null,
         categoryId: dto.categoryId ?? null,
       },
       include: { category: true },
@@ -216,14 +234,19 @@ export class VocabNotebookService {
       }
 
       seenInBatch.add(simplified);
+      const { traditional, traditionalPinyin } = normalizeTraditionalFields({
+        simplified, simplifiedPinyin, traditional: item.traditional, traditionalPinyin: item.traditionalPinyin,
+      });
       toCreate.push({
         userId,
         simplified,
         simplifiedPinyin,
-        traditional: item.traditional?.trim() || null,
-        traditionalPinyin: item.traditionalPinyin?.trim() || null,
+        traditional,
+        traditionalPinyin,
         meaningVi,
         example: item.example?.trim() || null,
+        examplePinyin: item.examplePinyin?.trim() || null,
+        exampleVietnamese: item.exampleVietnamese?.trim() || null,
         categoryId: item.categoryId ?? null,
       });
       results.push({ index, simplified, status: 'created' });
@@ -270,17 +293,34 @@ export class VocabNotebookService {
       await this.assertOwnsCategory(userId, dto.categoryId);
     }
 
+    // Effective simplified/pinyin (this update's value, or the existing one)
+    // are what a cleared Traditional field falls back to — only recomputed
+    // when Traditional/TraditionalPinyin are actually being touched in this
+    // request, so editing unrelated fields never silently overwrites an
+    // already-different Traditional value (spec: never replace a non-empty
+    // Traditional with Simplified just because Simplified changed).
+    const effectiveSimplified = dto.simplified?.trim() ?? word.simplified;
+    const effectiveSimplifiedPinyin = dto.simplifiedPinyin?.trim() ?? word.simplifiedPinyin;
+
     const updated = await this.prisma.vocabWord.update({
       where: { id },
       data: {
-        ...(dto.simplified !== undefined && { simplified: dto.simplified.trim() }),
-        ...(dto.simplifiedPinyin !== undefined && { simplifiedPinyin: dto.simplifiedPinyin.trim() }),
-        ...(dto.traditional !== undefined && { traditional: dto.traditional?.trim() || null }),
+        ...(dto.simplified !== undefined && { simplified: effectiveSimplified }),
+        ...(dto.simplifiedPinyin !== undefined && { simplifiedPinyin: effectiveSimplifiedPinyin }),
+        ...(dto.traditional !== undefined && {
+          traditional: normalizeTraditionalFields({
+            simplified: effectiveSimplified, simplifiedPinyin: effectiveSimplifiedPinyin, traditional: dto.traditional,
+          }).traditional,
+        }),
         ...(dto.traditionalPinyin !== undefined && {
-          traditionalPinyin: dto.traditionalPinyin?.trim() || null,
+          traditionalPinyin: normalizeTraditionalFields({
+            simplified: effectiveSimplified, simplifiedPinyin: effectiveSimplifiedPinyin, traditionalPinyin: dto.traditionalPinyin,
+          }).traditionalPinyin,
         }),
         ...(dto.meaningVi !== undefined && { meaningVi: dto.meaningVi.trim() }),
         ...(dto.example !== undefined && { example: dto.example?.trim() || null }),
+        ...(dto.examplePinyin !== undefined && { examplePinyin: dto.examplePinyin?.trim() || null }),
+        ...(dto.exampleVietnamese !== undefined && { exampleVietnamese: dto.exampleVietnamese?.trim() || null }),
         ...(dto.categoryId !== undefined && { categoryId: dto.categoryId }),
       },
       include: { category: true },

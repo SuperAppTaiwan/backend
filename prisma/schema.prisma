@@ -628,6 +628,8 @@ model VocabWord {
   traditionalPinyin String?  @map("traditional_pinyin")
   meaningVi         String   @map("meaning_vi")
   example           String?
+  examplePinyin     String?  @map("example_pinyin")
+  exampleVietnamese String?  @map("example_vietnamese")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
