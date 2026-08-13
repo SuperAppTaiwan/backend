@@ -1,15 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { VocabularyStatus } from '@prisma/client';
+import { Prisma, ReviewResult, VocabularyStatus } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { CreateVocabCategoryDto, UpdateVocabCategoryDto } from './dto/category.dto.js';
-import { CreateVocabWordDto, UpdateVocabWordDto } from './dto/word.dto.js';
+import { BulkVocabWordItemDto, CreateVocabWordDto, UpdateVocabWordDto } from './dto/word.dto.js';
 import { StartReviewDto } from './dto/review.dto.js';
 import { selectReviewWords } from './review-selection.js';
-import { nextReviewIntervalDays, nextReviewStatus } from './review-progress.js';
+import {
+  nextFamiliarityFromResult,
+  nextReviewIntervalDays,
+  nextReviewIntervalDaysFromResult,
+  nextReviewStatus,
+  nextReviewStatusFromResult,
+} from './review-progress.js';
 
 const DEFAULT_REVIEW_COUNT = 10;
+
+export interface BulkImportRowResult {
+  index: number;
+  simplified?: string;
+  status: 'created' | 'skipped' | 'failed';
+  reason?: string;
+}
 
 @Injectable()
 export class VocabNotebookService {
@@ -147,6 +160,108 @@ export class VocabNotebookService {
     return word;
   }
 
+  // ─── Bulk import (e.g. pasted from a spreadsheet) ───────────────────────────
+
+  async bulkCreateWords(userId: string, items: BulkVocabWordItemDto[]) {
+    // Two batched lookups instead of one query per row: category ownership
+    // and existing-word duplicates. Both need to reject/skip individual rows
+    // rather than the whole request, so validation happens in a single pass
+    // here instead of via ValidationPipe/CreateVocabWordDto.
+    const requestedCategoryIds = [...new Set(items.map((i) => i.categoryId).filter((id): id is string => !!id))];
+    const ownedCategories = requestedCategoryIds.length
+      ? await this.prisma.vocabCategory.findMany({
+          where: { id: { in: requestedCategoryIds }, userId },
+          select: { id: true },
+        })
+      : [];
+    const ownedCategoryIds = new Set(ownedCategories.map((c) => c.id));
+
+    const existingWords = await this.prisma.vocabWord.findMany({
+      where: { userId },
+      select: { simplified: true },
+    });
+    const existingSimplified = new Set(existingWords.map((w) => w.simplified));
+
+    const results: BulkImportRowResult[] = [];
+    const seenInBatch = new Set<string>();
+    const toCreate: Prisma.VocabWordCreateManyInput[] = [];
+
+    items.forEach((item, index) => {
+      const simplified = item.simplified?.trim();
+      const simplifiedPinyin = item.simplifiedPinyin?.trim();
+      const meaningVi = item.meaningVi?.trim();
+
+      if (!simplified) {
+        results.push({ index, status: 'failed', reason: 'Thiếu chữ giản thể' });
+        return;
+      }
+      if (!simplifiedPinyin) {
+        results.push({ index, simplified, status: 'failed', reason: 'Thiếu pinyin giản thể' });
+        return;
+      }
+      if (!meaningVi) {
+        results.push({ index, simplified, status: 'failed', reason: 'Thiếu nghĩa tiếng Việt' });
+        return;
+      }
+      // Never trust a client-supplied categoryId — reject rather than
+      // silently drop, so the user gets a clear reason instead of a word
+      // that quietly landed with no category.
+      if (item.categoryId && !ownedCategoryIds.has(item.categoryId)) {
+        results.push({ index, simplified, status: 'failed', reason: 'Danh mục không hợp lệ' });
+        return;
+      }
+      if (existingSimplified.has(simplified) || seenInBatch.has(simplified)) {
+        results.push({ index, simplified, status: 'skipped', reason: 'Đã tồn tại' });
+        return;
+      }
+
+      seenInBatch.add(simplified);
+      toCreate.push({
+        userId,
+        simplified,
+        simplifiedPinyin,
+        traditional: item.traditional?.trim() || null,
+        traditionalPinyin: item.traditionalPinyin?.trim() || null,
+        meaningVi,
+        example: item.example?.trim() || null,
+        categoryId: item.categoryId ?? null,
+      });
+      results.push({ index, simplified, status: 'created' });
+    });
+
+    if (toCreate.length > 0) {
+      try {
+        await this.prisma.vocabWord.createMany({ data: toCreate });
+      } catch {
+        // The batch insert itself failed (rare — a DB-level issue, not a
+        // per-row validation problem). Reclassify every row that was about
+        // to be created rather than reporting a false "created" count.
+        const failingSimplified = new Set(toCreate.map((c) => c.simplified as string));
+        for (const r of results) {
+          if (r.status === 'created' && r.simplified && failingSimplified.has(r.simplified)) {
+            r.status = 'failed';
+            r.reason = 'Lỗi khi lưu vào cơ sở dữ liệu';
+          }
+        }
+      }
+    }
+
+    const created = results.filter((r) => r.status === 'created').length;
+    const skipped = results.filter((r) => r.status === 'skipped').length;
+    const failed = results.filter((r) => r.status === 'failed').length;
+
+    if (created > 0) {
+      await this.events.publish({
+        userId,
+        eventType: EventType.VOCAB_WORD_BULK_CREATED,
+        sourceModule: 'vocab-notebook',
+        payload: { created, skipped, failed, total: items.length },
+      });
+    }
+
+    return { created, skipped, failed, results };
+  }
+
   async updateWord(userId: string, id: string, dto: UpdateVocabWordDto) {
     const word = await this.prisma.vocabWord.findFirst({ where: { id, userId } });
     if (!word) throw new NotFoundException('Vocabulary word not found');
@@ -256,7 +371,7 @@ export class VocabNotebookService {
     return { words: selected, sessionId };
   }
 
-  async submitWordReview(userId: string, vocabWordId: string, sessionId?: string) {
+  async submitWordReview(userId: string, vocabWordId: string, sessionId?: string, result?: ReviewResult) {
     const word = await this.prisma.vocabWord.findFirst({ where: { id: vocabWordId, userId } });
     if (!word) throw new NotFoundException('Vocabulary word not found');
 
@@ -265,10 +380,26 @@ export class VocabNotebookService {
     });
 
     const reviewCount = (existing?.reviewCount ?? 0) + 1;
-    const status = nextReviewStatus(reviewCount);
-    const nextReviewAt = new Date();
-    nextReviewAt.setDate(nextReviewAt.getDate() + nextReviewIntervalDays(reviewCount));
     const lastReviewSessionId = sessionId ?? null;
+    const nextReviewAt = new Date();
+
+    // Two progression curves share the same VocabReviewProgress row: a plain
+    // reviewCount-based ladder (handwriting-trace flow, no `result`) and a
+    // difficulty-rated one (Quick Review's flip-card AGAIN/HARD/GOOD/EASY,
+    // mirroring the legacy learning module's SRS curve — see review-progress.ts).
+    let status: VocabularyStatus;
+    let familiarity: number;
+    let intervalDays: number;
+    if (result) {
+      status = nextReviewStatusFromResult(result);
+      familiarity = nextFamiliarityFromResult(existing?.familiarity ?? 0, result);
+      intervalDays = nextReviewIntervalDaysFromResult(result);
+    } else {
+      status = nextReviewStatus(reviewCount);
+      familiarity = (existing?.familiarity ?? 0) + 1;
+      intervalDays = nextReviewIntervalDays(reviewCount);
+    }
+    nextReviewAt.setDate(nextReviewAt.getDate() + intervalDays);
 
     const progress = await this.prisma.vocabReviewProgress.upsert({
       where: { vocabWordId },
@@ -276,7 +407,7 @@ export class VocabNotebookService {
         userId,
         vocabWordId,
         status,
-        familiarity: 1,
+        familiarity: result ? familiarity : 1,
         reviewCount: 1,
         lastReviewedAt: new Date(),
         nextReviewAt,
@@ -284,7 +415,7 @@ export class VocabNotebookService {
       },
       update: {
         status,
-        familiarity: { increment: 1 },
+        familiarity: result ? { set: familiarity } : { increment: 1 },
         reviewCount: { increment: 1 },
         lastReviewedAt: new Date(),
         nextReviewAt,

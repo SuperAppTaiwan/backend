@@ -1,6 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { VocabularyStatus } from '@prisma/client';
+import { ReviewResult, VocabularyStatus } from '@prisma/client';
 import { VocabNotebookService } from './vocab-notebook.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
@@ -53,6 +53,7 @@ describe('VocabNotebookService', () => {
               findMany: jest.fn(),
               findFirst: jest.fn(),
               create: jest.fn(),
+              createMany: jest.fn(),
               update: jest.fn(),
               updateMany: jest.fn(),
               delete: jest.fn(),
@@ -249,6 +250,185 @@ describe('VocabNotebookService', () => {
           update: expect.objectContaining({ lastReviewSessionId: 'session-abc' }),
         }),
       );
+    });
+
+    // Quick Review's flip-card rating path — same VocabReviewProgress row as the
+    // handwriting-trace flow above, but driven by AGAIN/HARD/GOOD/EASY instead of
+    // a plain reviewCount ladder (see review-progress.ts).
+    describe('with a difficulty result (Quick Review)', () => {
+      it('marks the word LEARNED immediately on an EASY result', async () => {
+        (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(mockWord());
+        (prisma.vocabReviewProgress.findUnique as jest.Mock).mockResolvedValue(null);
+        (prisma.vocabReviewProgress.upsert as jest.Mock).mockImplementation(({ create }) => ({
+          ...create,
+          id: 'p1',
+        }));
+
+        const result = await service.submitWordReview('u1', 'w1', undefined, ReviewResult.EASY);
+
+        expect(result.status).toBe(VocabularyStatus.LEARNED);
+      });
+
+      it('keeps status LEARNING and does not lower familiarity below 0 on AGAIN', async () => {
+        (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(mockWord());
+        (prisma.vocabReviewProgress.findUnique as jest.Mock).mockResolvedValue(null);
+        (prisma.vocabReviewProgress.upsert as jest.Mock).mockImplementation(({ create }) => ({
+          ...create,
+          id: 'p1',
+        }));
+
+        const result = await service.submitWordReview('u1', 'w1', undefined, ReviewResult.AGAIN);
+
+        expect(result.status).toBe(VocabularyStatus.LEARNING);
+        expect(result.familiarity).toBe(0);
+      });
+
+      it('sets (not increments) familiarity from the result-based curve, unlike the no-result path', async () => {
+        (prisma.vocabWord.findFirst as jest.Mock).mockResolvedValue(mockWord());
+        (prisma.vocabReviewProgress.findUnique as jest.Mock).mockResolvedValue({
+          familiarity: 5,
+          reviewCount: 3,
+          lastReviewSessionId: null,
+        });
+        (prisma.vocabReviewProgress.upsert as jest.Mock).mockImplementation(({ update }) => update);
+
+        await service.submitWordReview('u1', 'w1', undefined, ReviewResult.GOOD);
+
+        expect(prisma.vocabReviewProgress.upsert).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({ status: VocabularyStatus.REVIEW, familiarity: { set: 5 } }),
+          }),
+        );
+      });
+    });
+  });
+
+  // ─── Bulk import ─────────────────────────────────────────────────────────
+  // Auth itself (rejecting unauthenticated requests) is enforced by the
+  // controller's class-level @UseGuards(JwtAuthGuard), the same as every
+  // other route here — not something the service layer ever sees, so it's
+  // not re-tested at this layer (consistent with the rest of this file).
+  describe('bulkCreateWords', () => {
+    it('creates multiple valid rows in one batched insert', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 2 });
+
+      const result = await service.bulkCreateWords('u1', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu' },
+        { simplified: '八', simplifiedPinyin: 'bā', meaningVi: 'tám' },
+      ]);
+
+      expect(result.created).toBe(2);
+      expect(result.skipped).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: expect.arrayContaining([
+          expect.objectContaining({ userId: 'u1', simplified: '爱' }),
+          expect.objectContaining({ userId: 'u1', simplified: '八' }),
+        ]),
+      });
+    });
+
+    it('reports per-row validation failures with a reason instead of rejecting the whole batch', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      const result = await service.bulkCreateWords('u1', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu' },
+        { simplified: '', simplifiedPinyin: 'bā', meaningVi: 'tám' },
+        { simplified: '爸爸', simplifiedPinyin: 'bàba', meaningVi: '' },
+      ]);
+
+      expect(result.created).toBe(1);
+      expect(result.failed).toBe(2);
+      expect(result.results).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ index: 1, status: 'failed', reason: 'Thiếu chữ giản thể' }),
+          expect.objectContaining({ index: 2, status: 'failed', reason: 'Thiếu nghĩa tiếng Việt' }),
+        ]),
+      );
+    });
+
+    it('skips a row whose simplified word already exists for this user, without failing the batch', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([{ simplified: '爱' }]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      const result = await service.bulkCreateWords('u1', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu' },
+        { simplified: '八', simplifiedPinyin: 'bā', meaningVi: 'tám' },
+      ]);
+
+      expect(result.skipped).toBe(1);
+      expect(result.created).toBe(1);
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ simplified: '八' })],
+      });
+    });
+
+    it('skips duplicate rows within the same pasted batch (not just against existing DB rows)', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      const result = await service.bulkCreateWords('u1', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu' },
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu (dup)' },
+      ]);
+
+      expect(result.created).toBe(1);
+      expect(result.skipped).toBe(1);
+    });
+
+    it('rejects a row whose categoryId belongs to another user (IDOR) instead of assigning it', async () => {
+      // findMany scoped to { id: in, userId } returns nothing for a category
+      // owned by someone else — exactly what a real Prisma query would do.
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+      const result = await service.bulkCreateWords('attacker', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu', categoryId: 'victims-category' },
+      ]);
+
+      expect(result.created).toBe(0);
+      expect(result.failed).toBe(1);
+      expect(result.results[0]).toEqual(
+        expect.objectContaining({ status: 'failed', reason: 'Danh mục không hợp lệ' }),
+      );
+      expect(prisma.vocabWord.createMany).not.toHaveBeenCalled();
+    });
+
+    it('accepts a categoryId that the user genuinely owns', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([{ id: 'cat1' }]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      const result = await service.bulkCreateWords('u1', [
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu', categoryId: 'cat1' },
+      ]);
+
+      expect(result.created).toBe(1);
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ categoryId: 'cat1' })],
+      });
+    });
+
+    it('never trusts a client-supplied userId — every created row is scoped to the authenticated user', async () => {
+      (prisma.vocabCategory.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.vocabWord.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+
+      await service.bulkCreateWords('u1', [
+        // @ts-expect-error — deliberately simulating a tampered payload that tries to inject a foreign userId
+        { simplified: '爱', simplifiedPinyin: 'ài', meaningVi: 'yêu', userId: 'someone-else' },
+      ]);
+
+      expect(prisma.vocabWord.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ userId: 'u1' })],
+      });
     });
   });
 });

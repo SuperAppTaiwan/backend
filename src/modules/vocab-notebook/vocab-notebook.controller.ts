@@ -5,7 +5,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AuthUser } from '../auth/strategies/jwt.strategy.js';
 import { VocabNotebookService } from './vocab-notebook.service.js';
 import { CreateVocabCategoryDto, UpdateVocabCategoryDto } from './dto/category.dto.js';
-import { CreateVocabWordDto, UpdateVocabWordDto } from './dto/word.dto.js';
+import { BulkCreateVocabWordsDto, CreateVocabWordDto, UpdateVocabWordDto } from './dto/word.dto.js';
 import { StartReviewDto, SubmitWordReviewDto } from './dto/review.dto.js';
 
 @ApiTags('Vocab Notebook')
@@ -70,6 +70,12 @@ export class VocabNotebookController {
     return this.service.createWord(user.userId, dto);
   }
 
+  @Post('words/bulk')
+  @ApiOperation({ summary: 'Bulk-create vocabulary words (e.g. pasted from a spreadsheet)' })
+  bulkCreateWords(@CurrentUser() user: AuthUser, @Body() dto: BulkCreateVocabWordsDto) {
+    return this.service.bulkCreateWords(user.userId, dto.items);
+  }
+
   @Put('words/:id')
   @ApiOperation({ summary: 'Edit a vocabulary word' })
   updateWord(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: UpdateVocabWordDto) {
@@ -102,6 +108,6 @@ export class VocabNotebookController {
   @Post('review/submit')
   @ApiOperation({ summary: 'Record that a word was reviewed in the current session' })
   submitWordReview(@CurrentUser() user: AuthUser, @Body() dto: SubmitWordReviewDto) {
-    return this.service.submitWordReview(user.userId, dto.vocabWordId, dto.sessionId);
+    return this.service.submitWordReview(user.userId, dto.vocabWordId, dto.sessionId, dto.result);
   }
 }

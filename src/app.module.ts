@@ -15,6 +15,7 @@ import { AIModule } from './modules/ai/ai.module.js';
 import { NotificationsModule } from './modules/notifications/notifications.module.js';
 import { FoodModule } from './modules/food/food.module.js';
 import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
+import { ChineseStoryModule } from './modules/chinese-story/chinese-story.module.js';
 
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { KnowledgeModule } from './modules/knowledge/knowledge.module.js';
     NotificationsModule,
     FoodModule,
     KnowledgeModule,
+    ChineseStoryModule,
   ],
 })
 export class AppModule {}

@@ -300,6 +300,7 @@ model User {
   vocabCategories        VocabCategory[]
   vocabWords             VocabWord[]
   vocabReviewProgress    VocabReviewProgress[]
+  stories                Story[]
 
   @@map("users")
 }
@@ -661,6 +662,32 @@ model VocabReviewProgress {
 
   @@index([userId])
   @@map("vocab_review_progress")
+}
+
+// AI-generated short stories built from a user's saved vocabulary (Truyện AI).
+// Generation itself (POST /chinese-story/generate) is a preview only and never
+// writes here — a row is created only once the user explicitly saves it, so a
+// user's rejected/regenerated drafts never accumulate as orphaned data.
+model Story {
+  id                   String   @id @default(cuid()) @map("_id")
+  userId               String   @map("user_id")
+  titleSimplified      String   @map("title_simplified")
+  titleTraditional     String   @map("title_traditional")
+  // StoryParagraph[]: [{ simplified, traditional, vietnamese }]
+  paragraphsJson       Json     @map("paragraphs_json")
+  // StoryVocabularyUsed[]: [{ simplified, traditional, pinyin, meaningVi }] — only words
+  // confirmed (by substring match against the generated text, not AI self-report) to
+  // actually appear in paragraphsJson; drives the reader's vocab highlighting.
+  vocabularyUsedJson   Json     @map("vocabulary_used_json")
+  wordCount            Int      @default(0) @map("word_count")
+  estimatedReadMinutes Int      @default(1) @map("estimated_read_minutes")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("chinese_stories")
 }
 
 // ─── Schedule ────────────────────────────────────────────────────────────────

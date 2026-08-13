@@ -1,6 +1,7 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ReviewResult } from '@prisma/client';
 
 export class StartReviewDto {
   @ApiPropertyOptional({ example: 'clxyz123', description: 'Omit to review across all categories' })
@@ -29,4 +30,13 @@ export class SubmitWordReviewDto {
   @IsOptional()
   @IsString()
   declare sessionId?: string;
+
+  @ApiPropertyOptional({
+    enum: ReviewResult,
+    description:
+      'Self-rated difficulty from a flip-card review (Quick Review). Omit for the handwriting-trace flow, which has no difficulty rating and keeps the existing pass-through progression.',
+  })
+  @IsOptional()
+  @IsEnum(ReviewResult)
+  declare result?: ReviewResult;
 }
