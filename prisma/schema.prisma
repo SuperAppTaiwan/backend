@@ -406,13 +406,16 @@ model Income {
 }
 
 model ExpenseCategory {
-  id        String              @id @default(cuid()) @map("_id")
-  userId    String?             @map("user_id")
-  name      String
-  type      ExpenseCategoryType
-  isDefault Boolean             @default(false) @map("is_default")
-  createdAt DateTime            @default(now()) @map("created_at")
-  updatedAt DateTime            @updatedAt @map("updated_at")
+  id         String              @id @default(cuid()) @map("_id")
+  userId     String?             @map("user_id")
+  name       String
+  type       ExpenseCategoryType
+  icon       String?
+  color      String?
+  isDefault  Boolean             @default(false) @map("is_default")
+  isArchived Boolean             @default(false) @map("is_archived")
+  createdAt  DateTime            @default(now()) @map("created_at")
+  updatedAt  DateTime            @updatedAt @map("updated_at")
 
   user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
   expenses Expense[]
@@ -875,6 +878,7 @@ model Ingredient {
   imageUrl               String?       @map("image_url")
   expirySource           String        @default("manual") @map("expiry_source")
   freshnessStatus        String?       @map("freshness_status")
+  lowStockThreshold      Float?        @map("low_stock_threshold")
   estimatedDaysRemaining Int?          @map("estimated_days_remaining")
   aiConfidence           Float?        @map("ai_confidence")
   ocrRawText             String?       @map("ocr_raw_text")

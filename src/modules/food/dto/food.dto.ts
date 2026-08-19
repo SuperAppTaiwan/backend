@@ -97,6 +97,12 @@ export class CreateIngredientDto {
   @IsOptional()
   @IsInt()
   declare estimatedDaysRemaining?: number;
+
+  @ApiPropertyOptional({ description: 'Quantity at or below which this ingredient is considered low stock; defaults to a sensible per-unit value when unset' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  declare lowStockThreshold?: number;
 }
 
 export class UpdateIngredientDto {
@@ -144,6 +150,18 @@ export class UpdateIngredientDto {
   @IsString()
   @MaxLength(500)
   declare notes?: string;
+
+  @ApiPropertyOptional({ description: 'AI-estimated freshness: fresh / good / aging / near_expiry / expired' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  declare freshnessStatus?: string;
+
+  @ApiPropertyOptional({ description: 'Quantity at or below which this ingredient is considered low stock; defaults to a sensible per-unit value when unset' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  declare lowStockThreshold?: number;
 }
 
 export class PurchaseIngredientDto {

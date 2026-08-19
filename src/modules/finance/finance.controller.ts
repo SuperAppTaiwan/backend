@@ -122,8 +122,11 @@ export class FinanceController {
 
   @Get('expense-categories')
   @ApiOperation({ summary: 'List expense categories (own + defaults)' })
-  findAllExpenseCategories(@CurrentUser() user: AuthUser) {
-    return this.financeService.findAllExpenseCategories(user.userId);
+  findAllExpenseCategories(
+    @CurrentUser() user: AuthUser,
+    @Query('includeArchived') includeArchived?: string,
+  ) {
+    return this.financeService.findAllExpenseCategories(user.userId, includeArchived === 'true');
   }
 
   @Put('expense-categories/:id')

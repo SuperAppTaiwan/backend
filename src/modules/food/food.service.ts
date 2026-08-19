@@ -6,6 +6,7 @@ import { EventsService, EventType } from '../events/events.service.js';
 import { AIProviderChain, VisionUnavailableError } from '../ai/providers/ai-provider-chain.service.js';
 import { UserHealthContextService } from '../profile/user-health-context.service.js';
 import { buildHealthAwareRecipePrompt, buildHealthAwareMealPrompt } from './prompts/health-aware-prompt.builder.js';
+import { withStockStatus } from './ingredient-status.util.js';
 
 const RECIPE_CATEGORY_IMAGES: Record<string, string> = {
   VEGETABLE: 'https://images.unsplash.com/photo-1512621776951-a57ef8c7f0cc?w=400&h=300&fit=crop&auto=format&q=80',
@@ -216,28 +217,30 @@ export class FoodService {
   // ─── Ingredients ──────────────────────────────────────────────────────────
 
   async getIngredients(userId: string) {
-    return this.prisma.ingredient.findMany({
+    const items = await this.prisma.ingredient.findMany({
       where: { userId },
       orderBy: [{ expiresAt: 'asc' }, { name: 'asc' }],
     });
+    return items.map(withStockStatus);
   }
 
   async getExpiringIngredients(userId: string, days = 7) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() + days);
-    return this.prisma.ingredient.findMany({
+    const items = await this.prisma.ingredient.findMany({
       where: {
         userId,
         expiresAt: { not: null, lte: cutoff },
       },
       orderBy: { expiresAt: 'asc' },
     });
+    return items.map(withStockStatus);
   }
 
   async getIngredient(userId: string, id: string) {
     const item = await this.prisma.ingredient.findFirst({ where: { id, userId } });
     if (!item) throw new NotFoundException('Ingredient not found');
-    return item;
+    return withStockStatus(item);
   }
 
   async createIngredient(userId: string, dto: CreateIngredientDto) {
@@ -257,11 +260,12 @@ export class FoodService {
         expirySource: dto.expirySource ?? 'manual',
         aiConfidence: dto.aiConfidence,
         freshnessStatus: dto.freshnessStatus,
+        lowStockThreshold: dto.lowStockThreshold,
         estimatedDaysRemaining: dto.estimatedDaysRemaining,
       },
     });
     await this.events.publish({ userId, eventType: EventType.INGREDIENT_CREATED, sourceModule: 'food', payload: { id: ingredient.id, name: ingredient.name } });
-    return ingredient;
+    return withStockStatus(ingredient);
   }
 
   async updateIngredient(userId: string, id: string, dto: UpdateIngredientDto) {
@@ -277,10 +281,12 @@ export class FoodService {
         cost: dto.cost,
         location: dto.location,
         notes: dto.notes,
+        freshnessStatus: dto.freshnessStatus,
+        lowStockThreshold: dto.lowStockThreshold,
       },
     });
     await this.events.publish({ userId, eventType: EventType.INGREDIENT_UPDATED, sourceModule: 'food', payload: { id } });
-    return updated;
+    return withStockStatus(updated);
   }
 
   async deleteIngredient(userId: string, id: string): Promise<{ message: string }> {
@@ -332,7 +338,7 @@ export class FoodService {
       payload: { id, name: ingredient.name, cost: dto.cost },
     });
 
-    return updated;
+    return withStockStatus(updated);
   }
 
   // ─── Recipes ──────────────────────────────────────────────────────────────

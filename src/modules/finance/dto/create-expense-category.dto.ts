@@ -18,4 +18,16 @@ export class CreateExpenseCategoryDto {
   @IsOptional()
   @IsBoolean()
   declare isDefault?: boolean;
+
+  @ApiPropertyOptional({ description: 'Ionicons glyph name, e.g. "fast-food-outline"' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  declare icon?: string;
+
+  @ApiPropertyOptional({ description: 'Hex color, e.g. "#F0647D"' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  declare color?: string;
 }

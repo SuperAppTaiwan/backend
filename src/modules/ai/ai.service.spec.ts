@@ -47,7 +47,7 @@ describe('AIService', () => {
       userVocabularyProgress: { findMany: jest.fn(), count: jest.fn() },
       learningPlan: { findMany: jest.fn(), count: jest.fn() },
       reviewSession: { findMany: jest.fn(), count: jest.fn() },
-      task: { findMany: jest.fn() },
+      task: { findMany: jest.fn(), count: jest.fn().mockResolvedValue(0) },
     };
 
     const mockDeterministic = new DeterministicAIProvider();
@@ -250,6 +250,27 @@ describe('AIService', () => {
 
   // ─── Cashflow Forecast ────────────────────────────────────────────────────────
 
+  describe('getDailySummary', () => {
+    it('feeds real finance/schedule data into the summary context instead of hardcoded zeros', async () => {
+      (prisma.aISuggestion.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.aIProfile.findUnique as jest.Mock).mockResolvedValue(makeProfile());
+      (prisma.userVocabularyProgress.count as jest.Mock).mockResolvedValue(4);
+      (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.income.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '25000' } }]);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '9000' } }]);
+      (prisma.task.count as jest.Mock)
+        .mockResolvedValueOnce(2) // overdue
+        .mockResolvedValueOnce(5); // completed this week
+
+      const result = await service.getDailySummary(USER_ID);
+
+      // Real net savings (25000-9000=16000) surfaces via the deterministic provider's
+      // finance line, not the old hardcoded netSavings:0.
+      expect(result.summary).toContain('16.000');
+      expect(result.provider).toBeDefined();
+    });
+  });
+
   describe('getCashflowForecast', () => {
     const now = new Date();
     // Months strictly before the current one, matching the service's [now-6, now) window.
@@ -305,7 +326,39 @@ describe('AIService', () => {
 
       expect(result.provider).toBe('deterministic');
       expect(result.biggestCategory).toBeNull();
-      expect(result.narrative).toContain('Chưa có đủ dữ liệu');
+      expect(result.narrative).toContain('Chưa có dữ liệu');
+    });
+
+    it('produces a forecast with LIMITED confidence from a single month of data instead of blocking', async () => {
+      const incomes = [{ amount: { toString: () => '20000' }, receivedDate: monthDate(-1) }];
+      const expenses = [{ amount: { toString: () => '8000' }, expenseDate: monthDate(-1), category: { name: 'Ăn uống' } }];
+      (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+
+      expect(result.basedOnMonths).toBe(1);
+      expect(result.confidence).toBe('LIMITED');
+      // Averaged over the real 1-month span, not diluted by 5 empty months in a fixed 6-month divisor.
+      expect(result.averageMonthlyIncome).toBe(20000);
+      expect(result.averageMonthlyExpense).toBe(8000);
+      expect(result.trend).toBe('NOT_ENOUGH_DATA');
+      expect(result.narrative.length).toBeGreaterThan(0);
+    });
+
+    it('reports MODERATE confidence with 2-3 months of data', async () => {
+      const incomes = [-1, -2].map((o) => ({ amount: { toString: () => '20000' }, receivedDate: monthDate(o) }));
+      const expenses = [-1, -2].map((o) => ({ amount: { toString: () => '8000' }, expenseDate: monthDate(o), category: { name: 'Ăn uống' } }));
+      (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+
+      expect(result.basedOnMonths).toBe(2);
+      expect(result.confidence).toBe('MODERATE');
+      expect(result.averageMonthlyIncome).toBe(20000);
     });
   });
 });

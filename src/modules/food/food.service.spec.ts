@@ -16,12 +16,13 @@ const makeIngredient = (overrides = {}) => ({
   name: 'Cà rốt',
   category: FoodCategory.VEGETABLE,
   unit: UnitOfMeasure.KG,
-  quantity: { toString: () => '1.5' },
-  expiresAt: new Date(Date.now() + 86400000 * 3),
+  quantity: 1.5,
+  expiresAt: new Date(Date.now() + 86400000 * 30),
   purchasedAt: new Date(),
   cost: null,
   location: 'Tủ lạnh',
   notes: null,
+  lowStockThreshold: null,
   createdAt: new Date(),
   updatedAt: new Date(),
   ...overrides,
@@ -146,7 +147,7 @@ describe('FoodService', () => {
       const items = [makeIngredient()];
       prisma.ingredient.findMany.mockResolvedValue(items as never);
       const result = await service.getIngredients(USER_ID);
-      expect(result).toEqual(items);
+      expect(result).toEqual([{ ...items[0], stockStatus: 'AVAILABLE' }]);
       expect(prisma.ingredient.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: USER_ID } }));
     });
   });
@@ -171,7 +172,7 @@ describe('FoodService', () => {
       const item = makeIngredient();
       prisma.ingredient.findFirst.mockResolvedValue(item as never);
       const result = await service.getIngredient(USER_ID, item.id);
-      expect(result).toEqual(item);
+      expect(result).toEqual({ ...item, stockStatus: 'AVAILABLE' });
     });
   });
 
@@ -180,7 +181,7 @@ describe('FoodService', () => {
       const item = makeIngredient();
       prisma.ingredient.create.mockResolvedValue(item as never);
       const result = await service.createIngredient(USER_ID, { name: 'Cà rốt' });
-      expect(result).toEqual(item);
+      expect(result).toEqual({ ...item, stockStatus: 'AVAILABLE' });
       expect(eventsService.publish).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'INGREDIENT_CREATED', userId: USER_ID }));
     });
 

@@ -10,8 +10,8 @@ const makeDate = (y: number, m: number, d = 1) => new Date(y, m - 1, d);
 const mockPrisma = {
   incomeSource: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn() },
   income: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn() },
-  expenseCategory: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn() },
-  expense: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn() },
+  expenseCategory: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn(), count: jest.fn(), createMany: jest.fn() },
+  expense: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn(), count: jest.fn() },
   budget: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), delete: jest.fn() },
 };
 
@@ -332,6 +332,89 @@ describe('FinanceService', () => {
       mockPrisma.expense.findFirst.mockResolvedValue(null);
 
       await expect(service.findOneExpense('u-1', 'other-exp-id')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ─── Expense categories ────────────────────────────────────────────────────────
+
+  describe('expense categories', () => {
+    it('creates a category with icon and color', async () => {
+      mockPrisma.expenseCategory.create.mockResolvedValue({
+        id: 'cat-1', userId: 'u-1', name: 'Ăn vặt', type: 'FOOD',
+        icon: 'ice-cream-outline', color: '#F0647D',
+        isDefault: false, isArchived: false, createdAt: new Date(), updatedAt: new Date(),
+      });
+
+      const result = await service.createExpenseCategory('u-1', {
+        name: 'Ăn vặt', type: 'FOOD' as never, icon: 'ice-cream-outline', color: '#F0647D',
+      });
+
+      expect(result.icon).toBe('ice-cream-outline');
+      expect(result.color).toBe('#F0647D');
+    });
+
+    it('lazily seeds the default categories once, on first list request', async () => {
+      mockPrisma.expenseCategory.count.mockResolvedValue(0);
+      mockPrisma.expenseCategory.findMany.mockResolvedValue([]);
+
+      await service.findAllExpenseCategories('u-1');
+
+      expect(mockPrisma.expenseCategory.createMany).toHaveBeenCalledTimes(1);
+      const seeded = mockPrisma.expenseCategory.createMany.mock.calls[0][0].data as { userId: null; isDefault: boolean }[];
+      expect(seeded.length).toBeGreaterThan(0);
+      expect(seeded.every((c) => c.userId === null && c.isDefault === true)).toBe(true);
+    });
+
+    it('does not reseed default categories once they already exist', async () => {
+      mockPrisma.expenseCategory.count.mockResolvedValue(9);
+      mockPrisma.expenseCategory.findMany.mockResolvedValue([]);
+
+      await service.findAllExpenseCategories('u-1');
+
+      expect(mockPrisma.expenseCategory.createMany).not.toHaveBeenCalled();
+    });
+
+    it('excludes archived categories from the default list', async () => {
+      mockPrisma.expenseCategory.count.mockResolvedValue(9);
+      mockPrisma.expenseCategory.findMany.mockResolvedValue([]);
+
+      await service.findAllExpenseCategories('u-1');
+
+      expect(mockPrisma.expenseCategory.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ isArchived: false }) }),
+      );
+    });
+
+    it('hard-deletes a category with no historical expenses referencing it', async () => {
+      mockPrisma.expenseCategory.findFirst.mockResolvedValue({ id: 'cat-1', userId: 'u-1' });
+      mockPrisma.expense.count.mockResolvedValue(0);
+
+      const result = await service.removeExpenseCategory('u-1', 'cat-1');
+
+      expect(mockPrisma.expenseCategory.delete).toHaveBeenCalledWith({ where: { id: 'cat-1' } });
+      expect(mockPrisma.expenseCategory.update).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true, archived: false });
+    });
+
+    it('archives (does not hard-delete) a category still referenced by historical expenses', async () => {
+      mockPrisma.expenseCategory.findFirst.mockResolvedValue({ id: 'cat-1', userId: 'u-1' });
+      mockPrisma.expense.count.mockResolvedValue(3);
+
+      const result = await service.removeExpenseCategory('u-1', 'cat-1');
+
+      expect(mockPrisma.expenseCategory.update).toHaveBeenCalledWith({
+        where: { id: 'cat-1' },
+        data: { isArchived: true },
+      });
+      expect(mockPrisma.expenseCategory.delete).not.toHaveBeenCalled();
+      expect(result).toEqual({ success: true, archived: true });
+    });
+
+    it('throws ForbiddenException when deleting another users category', async () => {
+      mockPrisma.expenseCategory.findFirst.mockResolvedValue({ id: 'cat-1', userId: 'u-other' });
+
+      await expect(service.removeExpenseCategory('u-1', 'cat-1')).rejects.toThrow(ForbiddenException);
+      expect(mockPrisma.expense.count).not.toHaveBeenCalled();
     });
   });
 

@@ -305,17 +305,37 @@ export class AIService {
   // ─── Daily Summary ────────────────────────────────────────────────────────────
 
   async getDailySummary(userId: string) {
-    const [suggestions, profile, learningProgress, tasks] = await Promise.allSettled([
-      this.prisma.aISuggestion.findMany({ where: { userId, status: 'ACTIVE' }, take: 5, orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }] }),
-      this.getOrCreateProfile(userId),
-      this.prisma.userVocabularyProgress.count({ where: { userId, nextReviewAt: { lte: new Date() } } }),
-      this.prisma.task.findMany({ where: { userId, status: { in: ['TODO', 'OVERDUE'] } }, take: 5, orderBy: { priority: 'asc' } }),
-    ]);
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const [suggestions, profile, learningProgress, tasks, monthIncomes, monthExpenses, overdueTaskCount, completedThisWeekCount] =
+      await Promise.allSettled([
+        this.prisma.aISuggestion.findMany({ where: { userId, status: 'ACTIVE' }, take: 5, orderBy: [{ priority: 'asc' }, { createdAt: 'desc' }] }),
+        this.getOrCreateProfile(userId),
+        this.prisma.userVocabularyProgress.count({ where: { userId, nextReviewAt: { lte: new Date() } } }),
+        this.prisma.task.findMany({ where: { userId, status: { in: ['TODO', 'OVERDUE'] } }, take: 5, orderBy: { priority: 'asc' } }),
+        this.prisma.income.findMany({ where: { userId, receivedDate: { gte: monthStart } } }),
+        this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: monthStart } } }),
+        this.prisma.task.count({ where: { userId, status: 'OVERDUE' } }),
+        this.prisma.task.count({ where: { userId, status: 'COMPLETED', updatedAt: { gte: weekAgo } } }),
+      ]);
+
+    const toAmount = (v: { toString(): string }) => parseFloat(v.toString());
+    const netSavings =
+      monthIncomes.status === 'fulfilled' && monthExpenses.status === 'fulfilled'
+        ? monthIncomes.value.reduce((s, i) => s + toAmount(i.amount), 0) -
+          monthExpenses.value.reduce((s, e) => s + toAmount(e.amount), 0)
+        : 0;
 
     const context = {
-      finance: { netSavings: 0 },
+      finance: { netSavings: Math.round(netSavings) },
       learning: { reviewDueCount: learningProgress.status === 'fulfilled' ? learningProgress.value : 0 },
-      schedule: { overdueTasks: 0, completedThisWeek: 0 },
+      schedule: {
+        overdueTasks: overdueTaskCount.status === 'fulfilled' ? overdueTaskCount.value : 0,
+        completedThisWeek: completedThisWeekCount.status === 'fulfilled' ? completedThisWeekCount.value : 0,
+      },
     };
 
     let summary: string;
@@ -565,20 +585,55 @@ export class AIService {
     const monthlySeries = [...monthBuckets.values()];
     const hasAnyData = monthlySeries.some((m) => m.income > 0 || m.expense > 0);
 
+    // How many calendar months of history the user actually has, not the fixed 6-month
+    // window size — averaging fixed totals over MONTHS=6 silently divides by empty
+    // months for anyone newer than that, crushing the projection toward zero. Instead,
+    // divide only by the span actually covered by data (clamped to the window).
+    const allTxDates = [
+      ...incomes.map((i) => i.receivedDate),
+      ...expenses.map((e) => e.expenseDate),
+    ];
+    let dataSpanMonths = 0;
+    if (allTxDates.length > 0) {
+      // The query window is [windowStart, thisMonthStart) — it never includes the
+      // current in-progress month, so the most recent possible bucket is last month,
+      // not "now". Measuring span against `now` would over-count by one whenever the
+      // most recent transaction is in that last completed month.
+      const mostRecentBucket = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const earliest = new Date(Math.min(...allTxDates.map((d) => d.getTime())));
+      const spanFromEarliest =
+        (mostRecentBucket.getFullYear() - earliest.getFullYear()) * 12 +
+        (mostRecentBucket.getMonth() - earliest.getMonth()) +
+        1;
+      dataSpanMonths = Math.min(MONTHS, Math.max(1, spanFromEarliest));
+    }
+
     const totalIncome = monthlySeries.reduce((s, m) => s + m.income, 0);
     const totalExpense = monthlySeries.reduce((s, m) => s + m.expense, 0);
-    const avgMonthlyIncome = totalIncome / MONTHS;
-    const avgMonthlyExpense = totalExpense / MONTHS;
+    const avgDivisor = Math.max(1, dataSpanMonths);
+    const avgMonthlyIncome = totalIncome / avgDivisor;
+    const avgMonthlyExpense = totalExpense / avgDivisor;
     const projectedMonthlySavings = avgMonthlyIncome - avgMonthlyExpense;
     const projectedSavingsAfter6Months = Math.round(projectedMonthlySavings * 6);
 
-    // Trend: most recent 3 months' net savings vs. the prior 3 months'.
-    const earlierNet = monthlySeries.slice(0, 3).reduce((s, m) => s + (m.income - m.expense), 0);
-    const recentNet = monthlySeries.slice(3).reduce((s, m) => s + (m.income - m.expense), 0);
-    let trend: 'IMPROVING' | 'STABLE' | 'DECLINING' = 'STABLE';
-    const trendThreshold = Math.abs(earlierNet) * 0.1 + 100;
-    if (recentNet - earlierNet > trendThreshold) trend = 'IMPROVING';
-    else if (earlierNet - recentNet > trendThreshold) trend = 'DECLINING';
+    // Forecast confidence scales with how long the user has actually been tracking —
+    // shown to the UI so a 1-month forecast is never presented with the same
+    // authority as a 6-month one, without blocking the feature outright.
+    const confidence: 'LIMITED' | 'MODERATE' | 'GOOD' =
+      dataSpanMonths >= 4 ? 'GOOD' : dataSpanMonths >= 2 ? 'MODERATE' : 'LIMITED';
+
+    // Trend (recent half of the window vs. the earlier half) is only meaningful once
+    // there's enough span to split in two — otherwise it's just comparing real months
+    // against zero-padded ones.
+    let trend: 'IMPROVING' | 'STABLE' | 'DECLINING' | 'NOT_ENOUGH_DATA' = 'NOT_ENOUGH_DATA';
+    if (dataSpanMonths >= 4) {
+      const earlierNet = monthlySeries.slice(0, 3).reduce((s, m) => s + (m.income - m.expense), 0);
+      const recentNet = monthlySeries.slice(3).reduce((s, m) => s + (m.income - m.expense), 0);
+      const trendThreshold = Math.abs(earlierNet) * 0.1 + 100;
+      trend = 'STABLE';
+      if (recentNet - earlierNet > trendThreshold) trend = 'IMPROVING';
+      else if (earlierNet - recentNet > trendThreshold) trend = 'DECLINING';
+    }
 
     // Biggest spending category over the window, for a concrete "you spend X% on Y" insight.
     const categoryTotals = new Map<string, number>();
@@ -600,10 +655,13 @@ export class AIService {
         : null;
 
     // No recurrence field exists on Income/Expense yet — approximate "recurring" spending
-    // as a category that shows up in most months of the window, rather than adding new
-    // schema (out of scope here; a real recurrence model is a separate feature).
+    // as a category that shows up in most months actually covered by data, rather than
+    // adding new schema (out of scope here; a real recurrence model is a separate
+    // feature). Threshold scales with dataSpanMonths so a 1-2 month-old account can't
+    // have every category falsely flagged "recurring" off a single occurrence.
+    const recurringThreshold = dataSpanMonths <= 1 ? Infinity : Math.max(2, Math.ceil(dataSpanMonths * 0.6));
     const recurringCategories = [...monthsSeenByCategory.entries()]
-      .filter(([, months]) => months.size >= Math.max(2, MONTHS - 2))
+      .filter(([, months]) => months.size >= recurringThreshold)
       .map(([name, months]) => ({ name, monthsSeen: months.size }));
 
     const budget = budgets[0] ?? null;
@@ -640,13 +698,22 @@ export class AIService {
       }
     }
 
+    const confidenceNote =
+      confidence === 'LIMITED'
+        ? ` Dự báo dựa trên ${dataSpanMonths} tháng dữ liệu — độ chính xác còn hạn chế và sẽ cải thiện khi bạn tiếp tục dùng Lumi.`
+        : confidence === 'MODERATE'
+          ? ` Dự báo dựa trên ${dataSpanMonths} tháng dữ liệu gần đây — độ chính xác ở mức trung bình.`
+          : '';
+
     const deterministicNarrative = !hasAnyData
-      ? 'Chưa có đủ dữ liệu thu chi trong 6 tháng qua để đưa ra dự báo. Hãy ghi lại thu nhập và chi tiêu để nhận phân tích chi tiết hơn.'
+      ? 'Chưa có dữ liệu thu chi để dự báo. Hãy bắt đầu ghi lại thu nhập và chi tiêu để Lumi đưa ra dự báo dòng tiền cho bạn.'
       : trend === 'IMPROVING'
-        ? `Tình hình tài chính đang cải thiện: tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng trong 3 tháng gần đây, cao hơn giai đoạn trước.`
+        ? `Tình hình tài chính đang cải thiện: tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng trong 3 tháng gần đây, cao hơn giai đoạn trước.${confidenceNote}`
         : trend === 'DECLINING'
-          ? `Tiết kiệm đang giảm dần so với 3 tháng trước — nên rà soát lại các khoản chi lớn hoặc không đều đặn.`
-          : `Tình hình tài chính khá ổn định, tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng.`;
+          ? `Tiết kiệm đang giảm dần so với 3 tháng trước — nên rà soát lại các khoản chi lớn hoặc không đều đặn.${confidenceNote}`
+          : trend === 'NOT_ENOUGH_DATA'
+            ? `Tiết kiệm trung bình khoảng ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng.${confidenceNote}`
+            : `Tình hình tài chính khá ổn định, tiết kiệm trung bình ${Math.round(projectedMonthlySavings).toLocaleString('vi-VN')} ${currency}/tháng.${confidenceNote}`;
 
     let narrative = deterministicNarrative;
     let recommendations = deterministicRecommendations;
@@ -665,6 +732,8 @@ export class AIService {
           recurringCategories,
           currency,
           hasBudget: !!budget,
+          dataSpanMonths,
+          confidence,
         });
         const text = await this.chain.generateText(prompt);
         const parsed = text ? this.parseCashflowAiResponse(text) : null;
@@ -679,7 +748,9 @@ export class AIService {
     }
 
     return {
-      basedOnMonths: MONTHS,
+      basedOnMonths: dataSpanMonths,
+      windowMonths: MONTHS,
+      confidence,
       currency,
       averageMonthlyIncome: Math.round(avgMonthlyIncome),
       averageMonthlyExpense: Math.round(avgMonthlyExpense),
@@ -706,10 +777,12 @@ export class AIService {
     recurringCategories: { name: string; monthsSeen: number }[];
     currency: string;
     hasBudget: boolean;
+    dataSpanMonths: number;
+    confidence: 'LIMITED' | 'MODERATE' | 'GOOD';
   }): string {
     return [
       'Bạn là một cố vấn tài chính cá nhân cho người Việt đang sinh sống tại Đài Loan.',
-      `Dữ liệu 6 tháng gần đây của người dùng (đơn vị tiền tệ: ${data.currency}):`,
+      `Dữ liệu ${data.dataSpanMonths} tháng gần đây của người dùng (đơn vị tiền tệ: ${data.currency}, độ tin cậy dữ liệu: ${data.confidence}):`,
       `- Thu nhập trung bình/tháng: ${data.avgMonthlyIncome.toLocaleString('vi-VN')}`,
       `- Chi tiêu trung bình/tháng: ${data.avgMonthlyExpense.toLocaleString('vi-VN')}`,
       `- Tiết kiệm dự kiến/tháng: ${data.projectedMonthlySavings.toLocaleString('vi-VN')}`,
@@ -724,7 +797,10 @@ export class AIService {
       '{"narrative": "1-2 câu nhận xét ngắn gọn, cụ thể về tình hình tài chính", "recommendations": ["gợi ý 1", "gợi ý 2", "gợi ý 3"]}',
       '',
       'Yêu cầu: mỗi gợi ý phải cụ thể, dựa trên số liệu đã cho ở trên (không bịa số liệu mới), bằng tiếng Việt, tối đa 30 từ mỗi gợi ý, tối đa 4 gợi ý.',
-    ].join('\n');
+      data.confidence === 'LIMITED'
+        ? `Lưu ý: dữ liệu chỉ có ${data.dataSpanMonths} tháng — narrative phải nêu rõ đây là ước tính ban đầu, không khẳng định chắc chắn.`
+        : '',
+    ].filter(Boolean).join('\n');
   }
 
   private parseCashflowAiResponse(text: string): { narrative: string; recommendations: string[] } | null {

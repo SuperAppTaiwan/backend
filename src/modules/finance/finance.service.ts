@@ -17,6 +17,22 @@ import { CreateExpenseDto } from './dto/create-expense.dto.js';
 import { UpdateExpenseDto } from './dto/update-expense.dto.js';
 import { CreateBudgetDto } from './dto/create-budget.dto.js';
 import { UpdateBudgetDto } from './dto/update-budget.dto.js';
+import { ExpenseCategoryType } from '@prisma/client';
+
+// Seeded lazily the first time a user asks for their category list and none of these
+// exist yet — mirrors the lazy-global-seed pattern already used for vocab categories
+// elsewhere in this codebase, so no separate migration/seed script is needed.
+const DEFAULT_EXPENSE_CATEGORIES: { name: string; type: ExpenseCategoryType; icon: string; color: string }[] = [
+  { name: 'Ăn uống', type: ExpenseCategoryType.FOOD, icon: 'fast-food-outline', color: '#F0647D' },
+  { name: 'Di chuyển', type: ExpenseCategoryType.TRANSPORTATION, icon: 'bus-outline', color: '#4C6EF5' },
+  { name: 'Mua sắm', type: ExpenseCategoryType.SHOPPING, icon: 'bag-handle-outline', color: '#AE3EC9' },
+  { name: 'Thuê nhà', type: ExpenseCategoryType.RENT, icon: 'home-outline', color: '#F08C00' },
+  { name: 'Tiện ích', type: ExpenseCategoryType.UTILITIES, icon: 'flash-outline', color: '#0CA678' },
+  { name: 'Giáo dục', type: ExpenseCategoryType.EDUCATION, icon: 'school-outline', color: '#1971C2' },
+  { name: 'Giải trí', type: ExpenseCategoryType.ENTERTAINMENT, icon: 'game-controller-outline', color: '#E64980' },
+  { name: 'Sức khỏe', type: ExpenseCategoryType.HEALTH, icon: 'medkit-outline', color: '#E03131' },
+  { name: 'Khác', type: ExpenseCategoryType.OTHER, icon: 'ellipsis-horizontal-circle-outline', color: '#868E96' },
+];
 
 type DecimalLike = { toString(): string } | null;
 
@@ -176,21 +192,42 @@ export class FinanceService {
 
   // ─── Expense Categories ──────────────────────────────────────────────────────
 
+  private async ensureDefaultExpenseCategoriesSeeded() {
+    const existing = await this.prisma.expenseCategory.count({ where: { isDefault: true } });
+    if (existing > 0) return;
+    await this.prisma.expenseCategory.createMany({
+      data: DEFAULT_EXPENSE_CATEGORIES.map((c) => ({
+        userId: null,
+        name: c.name,
+        type: c.type,
+        icon: c.icon,
+        color: c.color,
+        isDefault: true,
+      })),
+    });
+  }
+
   async createExpenseCategory(userId: string, dto: CreateExpenseCategoryDto) {
     const cat = await this.prisma.expenseCategory.create({
       data: {
         userId,
         name: dto.name,
         type: dto.type,
+        icon: dto.icon,
+        color: dto.color,
         isDefault: dto.isDefault ?? false,
       },
     });
     return this.mapCategory(cat);
   }
 
-  async findAllExpenseCategories(userId: string) {
+  async findAllExpenseCategories(userId: string, includeArchived = false) {
+    await this.ensureDefaultExpenseCategoriesSeeded();
     const cats = await this.prisma.expenseCategory.findMany({
-      where: { OR: [{ userId }, { isDefault: true }] },
+      where: {
+        OR: [{ userId }, { isDefault: true }],
+        ...(includeArchived ? {} : { isArchived: false }),
+      },
       orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
     });
     return cats.map(this.mapCategory);
@@ -206,6 +243,8 @@ export class FinanceService {
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.type !== undefined && { type: dto.type }),
+        ...(dto.icon !== undefined && { icon: dto.icon }),
+        ...(dto.color !== undefined && { color: dto.color }),
       },
     });
     return this.mapCategory(updated);
@@ -215,8 +254,17 @@ export class FinanceService {
     const cat = await this.prisma.expenseCategory.findFirst({ where: { id } });
     if (!cat) throw new NotFoundException('Expense category not found');
     if (cat.userId !== userId) throw new ForbiddenException('Not your category');
+
+    // A category still referenced by historical expenses is archived (hidden from
+    // selection, kept on existing records) rather than hard-deleted, so past
+    // transactions never lose their category label or dangle on a SetNull FK.
+    const referencedCount = await this.prisma.expense.count({ where: { categoryId: id } });
+    if (referencedCount > 0) {
+      await this.prisma.expenseCategory.update({ where: { id }, data: { isArchived: true } });
+      return { success: true, archived: true };
+    }
     await this.prisma.expenseCategory.delete({ where: { id } });
-    return { success: true };
+    return { success: true, archived: false };
   }
 
   // ─── Expenses ────────────────────────────────────────────────────────────────
@@ -633,11 +681,14 @@ export class FinanceService {
 
   private mapCategory(c: {
     id: string; userId: string | null; name: string; type: string;
-    isDefault: boolean; createdAt: Date; updatedAt: Date;
+    icon: string | null; color: string | null;
+    isDefault: boolean; isArchived: boolean; createdAt: Date; updatedAt: Date;
   }) {
     return {
       id: c.id, userId: c.userId, name: c.name, type: c.type,
-      isDefault: c.isDefault, createdAt: c.createdAt.toISOString(),
+      icon: c.icon, color: c.color,
+      isDefault: c.isDefault, isArchived: c.isArchived,
+      createdAt: c.createdAt.toISOString(),
       updatedAt: c.updatedAt.toISOString(),
     };
   }
