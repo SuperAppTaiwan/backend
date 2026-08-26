@@ -220,27 +220,6 @@ describe('FoodService', () => {
     });
   });
 
-  describe('purchaseIngredient', () => {
-    it('marks ingredient as purchased and publishes event', async () => {
-      const item = makeIngredient();
-      prisma.ingredient.findFirst.mockResolvedValue(item as never);
-      prisma.ingredient.update.mockResolvedValue({ ...item, purchasedAt: new Date() } as never);
-      await service.purchaseIngredient(USER_ID, item.id, { cost: 30000, createExpense: false });
-      expect(prisma.ingredient.update).toHaveBeenCalled();
-      expect(eventsService.publish).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'INGREDIENT_PURCHASED' }));
-    });
-
-    it('creates finance expense when createExpense is true', async () => {
-      const item = makeIngredient();
-      prisma.ingredient.findFirst.mockResolvedValue(item as never);
-      prisma.ingredient.update.mockResolvedValue({ ...item, purchasedAt: new Date() } as never);
-      prisma.expenseCategory.findFirst.mockResolvedValue({ id: 'cat-food' } as never);
-      prisma.expense.create.mockResolvedValue({} as never);
-      await service.purchaseIngredient(USER_ID, item.id, { cost: 50000, createExpense: true });
-      expect(prisma.expense.create).toHaveBeenCalled();
-    });
-  });
-
   // ─── Recipe recommendations ────────────────────────────────────────────────
 
   describe('getRecipeRecommendations', () => {

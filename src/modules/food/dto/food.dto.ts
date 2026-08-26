@@ -164,25 +164,6 @@ export class UpdateIngredientDto {
   declare lowStockThreshold?: number;
 }
 
-export class PurchaseIngredientDto {
-  @ApiPropertyOptional({ description: 'Actual purchase cost in TWD' })
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  declare cost?: number;
-
-  @ApiPropertyOptional({ description: 'If true, create a Finance expense record' })
-  @IsOptional()
-  @IsBoolean()
-  declare createExpense?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
-  declare note?: string;
-}
-
 // ─── Recipe DTOs ─────────────────────────────────────────────────────────────
 
 export class RecipeIngredientItemDto {

@@ -17,7 +17,6 @@ import { FoodService } from './food.service.js';
 import {
   CreateIngredientDto,
   UpdateIngredientDto,
-  PurchaseIngredientDto,
   CreateRecipeDto,
   UpdateRecipeDto,
   CreateMealPlanDto,
@@ -90,13 +89,6 @@ export class FoodController {
   @ApiResponse({ status: 200, description: 'Ingredient deleted' })
   deleteIngredient(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.foodService.deleteIngredient(user.userId, id);
-  }
-
-  @Post('ingredients/:id/purchase')
-  @ApiOperation({ summary: 'Mark ingredient as purchased, optionally log finance expense' })
-  @ApiResponse({ status: 200, description: 'Ingredient marked as purchased' })
-  purchaseIngredient(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: PurchaseIngredientDto) {
-    return this.foodService.purchaseIngredient(user.userId, id, dto);
   }
 
   // ─── Recipes ──────────────────────────────────────────────────────────────

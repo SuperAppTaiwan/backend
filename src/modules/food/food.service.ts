@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ExpenseCategoryType, FoodCategory, PaymentMethod, Prisma, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
+import { FoodCategory, Prisma, ShoppingListStatus, UnitOfMeasure } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { AIProviderChain, VisionUnavailableError } from '../ai/providers/ai-provider-chain.service.js';
@@ -71,7 +71,6 @@ export interface IngredientScanResult {
 import type {
   CreateIngredientDto,
   UpdateIngredientDto,
-  PurchaseIngredientDto,
   CreateRecipeDto,
   UpdateRecipeDto,
   CreateMealPlanDto,
@@ -294,51 +293,6 @@ export class FoodService {
     await this.prisma.ingredient.delete({ where: { id } });
     await this.events.publish({ userId, eventType: EventType.INGREDIENT_DELETED, sourceModule: 'food', payload: { id } });
     return { message: 'Ingredient deleted' };
-  }
-
-  async purchaseIngredient(userId: string, id: string, dto: PurchaseIngredientDto) {
-    const ingredient = await this.getIngredient(userId, id);
-
-    const updated = await this.prisma.ingredient.update({
-      where: { id },
-      data: {
-        purchasedAt: new Date(),
-        cost: dto.cost ?? ingredient.cost,
-      },
-    });
-
-    // Optionally create a Finance expense record
-    if (dto.createExpense && dto.cost && dto.cost > 0) {
-      try {
-        const foodCategory = await this.prisma.expenseCategory.findFirst({
-          where: { type: ExpenseCategoryType.FOOD, isDefault: true },
-        });
-        await this.prisma.expense.create({
-          data: {
-            userId,
-            categoryId: foodCategory?.id ?? null,
-            amount: dto.cost,
-            currency: 'TWD',
-            expenseDate: new Date(),
-            paymentMethod: PaymentMethod.CASH,
-            sourceModule: 'food',
-            sourceEntityId: id,
-            note: dto.note ?? `Mua ${ingredient.name}`,
-          },
-        });
-      } catch (err) {
-        this.logger.warn('Failed to create finance expense for ingredient purchase', err);
-      }
-    }
-
-    await this.events.publish({
-      userId,
-      eventType: EventType.INGREDIENT_PURCHASED,
-      sourceModule: 'food',
-      payload: { id, name: ingredient.name, cost: dto.cost },
-    });
-
-    return withStockStatus(updated);
   }
 
   // ─── Recipes ──────────────────────────────────────────────────────────────
