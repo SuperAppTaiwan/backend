@@ -37,6 +37,7 @@ export class NotificationsService {
         budgetWarning: dto.budgetWarning,
         dailyVocabulary: dto.dailyVocabulary,
         weeklySummary: dto.weeklySummary,
+        recurringExpenseReminder: dto.recurringExpenseReminder,
         pushEnabled: dto.pushEnabled,
         emailEnabled: dto.emailEnabled,
         quietHoursStart: dto.quietHoursStart,

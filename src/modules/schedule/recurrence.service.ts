@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DateTime } from 'luxon';
 import { RRule } from 'rrule';
 
-export type RecurrenceFrequency = 'WEEKLY' | 'MONTHLY';
+export type RecurrenceFrequency = 'WEEKLY' | 'MONTHLY' | 'YEARLY';
 export type RecurrenceMonthlyType = 'DAY_OF_MONTH' | 'ORDINAL_WEEKDAY';
 export type RecurrenceEndType = 'NEVER' | 'UNTIL' | 'COUNT';
 export type WeekdayCode = 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU';
@@ -55,7 +55,8 @@ function ordinalForDayOfMonth(day: number): number {
  * Known, deterministic policy: for MONTHLY/DAY_OF_MONTH rules, months that don't contain
  * that day-of-month (e.g. BYMONTHDAY=31 in February, or in any 30-day month) are skipped
  * entirely for that month. This is rrule's/RFC5545's native standard behavior and is the
- * chosen policy here, not a bug — we do not "roll over" to the nearest valid day.
+ * chosen policy here, not a bug — we do not "roll over" to the nearest valid day. The same
+ * policy applies to YEARLY rules anchored on Feb 29: skipped entirely in non-leap years.
  */
 @Injectable()
 export class RecurrenceService {
@@ -92,6 +93,12 @@ export class RecurrenceService {
         const ordinal = isLastOccurrence ? -1 : ordinalForDayOfMonth(day);
         parts.push(`BYDAY=${ordinal}${weekdayCode}`);
       }
+    } else if (input.frequency === 'YEARLY') {
+      // Same skip-don't-roll-over policy as MONTHLY/DAY_OF_MONTH: a Feb 29 anchor simply has no
+      // occurrence in a non-leap year, per RFC5545/rrule's native behavior. This is the chosen
+      // policy, not a bug — see the class doc comment above.
+      parts.push(`BYMONTH=${dtstart.getUTCMonth() + 1}`);
+      parts.push(`BYMONTHDAY=${dtstart.getUTCDate()}`);
     }
 
     const endType = input.endType ?? 'NEVER';

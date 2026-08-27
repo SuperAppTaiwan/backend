@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+// Aliased: this project's own Schedule *feature* module (below) is unrelated to and would
+// otherwise collide in name with @nestjs/schedule's cron-trigger ScheduleModule.
+import { ScheduleModule as CronModule } from '@nestjs/schedule';
 import { validateEnv } from './config/env.validation.js';
 import { PrismaModule } from './infrastructure/prisma/prisma.module.js';
 import { HealthModule } from './modules/health/health.module.js';
@@ -23,6 +26,7 @@ import { ChineseStoryModule } from './modules/chinese-story/chinese-story.module
       isGlobal: true,
       validate: validateEnv,
     }),
+    CronModule.forRoot(),
     PrismaModule,
     HealthModule,
     EventsModule,

@@ -61,6 +61,12 @@ describe('RecurrenceService', () => {
       expect(rule).toBe('FREQ=MONTHLY;BYDAY=-1MO');
     });
 
+    it('builds a yearly rule', () => {
+      const dtstart = new Date('2026-08-20T09:00:00Z');
+      const rule = service.buildRRuleString({ frequency: 'YEARLY' }, dtstart);
+      expect(rule).toBe('FREQ=YEARLY;BYMONTH=8;BYMONTHDAY=20');
+    });
+
     it('appends UNTIL for endType=UNTIL', () => {
       const dtstart = new Date('2026-07-06T09:00:00Z');
       const rule = service.buildRRuleString(
@@ -181,6 +187,45 @@ describe('RecurrenceService', () => {
       // 2nd Monday of Jul, Aug, Sep
       expect(occurrences).toHaveLength(3);
       expect(occurrences[1].occurrenceStart.toISOString()).toBe('2026-08-10T09:00:00.000Z');
+    });
+
+    it('expands yearly occurrences (ARC-fee-style: same month/day every year)', () => {
+      const dtstart = new Date('2026-08-20T09:00:00.000Z');
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: dtstart,
+        recurrenceRule: 'FREQ=YEARLY;BYMONTH=8;BYMONTHDAY=20',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2026-01-01T00:00:00Z'),
+        new Date('2029-01-01T00:00:00Z'),
+      );
+      const dates = occurrences.map((o) => o.occurrenceStart.toISOString().slice(0, 10));
+      expect(dates).toEqual(['2026-08-20', '2027-08-20', '2028-08-20']);
+    });
+
+    it('skips a Feb 29 yearly anchor entirely in non-leap years but includes leap years', () => {
+      const dtstart = new Date('2028-02-29T09:00:00.000Z'); // 2028 is a leap year
+      const master = {
+        id: 'm1',
+        startTime: dtstart,
+        endTime: dtstart,
+        recurrenceRule: 'FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29',
+        recurrenceTimezone: 'Asia/Taipei',
+        recurrenceEndAt: null,
+      };
+      const occurrences = service.expandOccurrences(
+        master,
+        new Date('2028-01-01T00:00:00Z'),
+        new Date('2033-01-01T00:00:00Z'),
+      );
+      const years = occurrences.map((o) => o.occurrenceStart.getUTCFullYear());
+      // 2028 and 2032 are leap years; 2029-2031 have no Feb 29 and are skipped.
+      expect(years).toEqual([2028, 2032]);
     });
 
     it('cuts off expansion at UNTIL', () => {

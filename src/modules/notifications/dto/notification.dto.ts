@@ -30,6 +30,11 @@ export class UpdateNotificationPreferenceDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
+  declare recurringExpenseReminder?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
   declare pushEnabled?: boolean;
 
   @ApiPropertyOptional()

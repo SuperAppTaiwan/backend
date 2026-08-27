@@ -53,6 +53,26 @@ enum PaymentMethod {
   OTHER
 }
 
+// Recurring expense enums. Kept separate from Schedule's own recurrence types (which live
+// only as TS unions, not Prisma enums, since FixedEvent/Task never store a denormalized
+// frequency column) because recurring-expense list/detail screens need a cheap, directly
+// queryable/displayable frequency without parsing the RRULE string — see RecurringExpense
+// below. Adding a new frequency later (e.g. DAILY, CUSTOM) is one enum value + one branch in
+// RecurrenceService.buildRRuleString, per the "additional recurrence types" requirement.
+enum RecurringExpenseFrequency {
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+enum RecurringExpenseReminderOffset {
+  NONE
+  ON_DUE_DATE
+  DAYS_1
+  DAYS_3
+  DAYS_7
+}
+
 // Goal enums
 enum GoalType {
   CAR
@@ -238,6 +258,7 @@ enum NotificationType {
   ARC_RENEWAL
   INSURANCE_RENEWAL
   WEEKLY_SUMMARY
+  RECURRING_EXPENSE_DUE
   SYSTEM
 }
 
@@ -275,6 +296,8 @@ model User {
   expenseCategories      ExpenseCategory[]
   expenses               Expense[]
   budgets                Budget[]
+  recurringExpenses      RecurringExpense[]
+  recurringExpensePayments RecurringExpensePayment[]
   goals                  Goal[]
   goalMilestones         GoalMilestone[]
   goalForecasts          GoalForecast[]
@@ -417,8 +440,9 @@ model ExpenseCategory {
   createdAt  DateTime            @default(now()) @map("created_at")
   updatedAt  DateTime            @updatedAt @map("updated_at")
 
-  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
-  expenses Expense[]
+  user             User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  expenses         Expense[]
+  recurringExpenses RecurringExpense[]
 
   @@map("expense_categories")
 }
@@ -459,6 +483,82 @@ model Budget {
 
   @@unique([userId, month, year])
   @@map("budgets")
+}
+
+// Recurring/fixed future expenses (rent, ARC fee, subscriptions, insurance, tuition, etc.).
+// Deliberately recurrence-rule-based (reuses Schedule's RecurrenceService/RRULE engine — see
+// recurring-expense.service.ts) plus a payment/history table, rather than pre-materializing
+// future rows: `nextDueDate`/occurrence status are always computed live from
+// (recurrenceRule, firstDueDate, RecurringExpensePayment rows), never stored, so they can
+// never go stale after an edit and there is nothing to keep in sync. isActive is a manual
+// pause switch (distinct from deletion — see the controller's stop-recurring flow).
+model RecurringExpense {
+  id                 String                          @id @default(cuid()) @map("_id")
+  userId             String                          @map("user_id")
+  name               String
+  amount             Float
+  currency           String                          @default("TWD")
+  categoryId         String?                         @map("category_id")
+  frequency          RecurringExpenseFrequency
+  // RFC5545 RRULE string built by RecurrenceService.buildRRuleString at create/update time —
+  // authoritative for occurrence computation. `frequency` above is a denormalized display/
+  // filter convenience kept in sync with it, never read independently for date math.
+  recurrenceRule     String                          @map("recurrence_rule")
+  recurrenceTimezone String                          @default("Asia/Taipei") @map("recurrence_timezone")
+  // The very first due date this obligation was anchored to (dtstart for the RRULE). Immutable
+  // in spirit — editing the recurrence pattern re-anchors this to the edit time (see
+  // recurring-expense.service.ts's update()) rather than rewriting history, since already-paid
+  // occurrences are keyed by their own scheduledDueDate on RecurringExpensePayment, not by this
+  // field.
+  firstDueDate       DateTime                        @map("first_due_date")
+  reminderOffset     RecurringExpenseReminderOffset  @default(NONE) @map("reminder_offset")
+  note               String?
+  isActive           Boolean                         @default(true) @map("is_active")
+  // Dedup key for the daily reminder cron (see recurring-expense-reminder.cron.ts) — a plain
+  // "last sent" date is sufficient because the cron re-evaluates the current unpaid occurrence
+  // fresh on every run, so a paid/deleted/edited obligation naturally stops being reminded
+  // without any explicit cancellation bookkeeping.
+  lastReminderSentAt DateTime?                       @map("last_reminder_sent_at")
+  createdAt          DateTime                        @default(now()) @map("created_at")
+  updatedAt          DateTime                        @updatedAt @map("updated_at")
+
+  user     User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category ExpenseCategory?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  payments RecurringExpensePayment[]
+
+  @@index([userId])
+  @@map("recurring_expenses")
+}
+
+// One row per paid occurrence of a RecurringExpense. `recurringExpenseId` is nullable with
+// onDelete: SetNull (not Cascade) so that removing the recurring definition — the explicit
+// "do not repeat" user action — preserves this payment history as orphaned-but-intact rows,
+// mirroring the existing ExpenseCategory->Expense and VocabCategory->VocabWord SetNull
+// precedent elsewhere in this schema for "delete the config, keep the history".
+model RecurringExpensePayment {
+  id                 String    @id @default(cuid()) @map("_id")
+  recurringExpenseId String?   @map("recurring_expense_id")
+  userId             String    @map("user_id")
+  // The occurrence being satisfied, as an exact instant produced by
+  // RecurrenceService.expandOccurrences — the natural key for "has this occurrence been paid".
+  scheduledDueDate   DateTime  @map("scheduled_due_date")
+  paidAt             DateTime  @default(now()) @map("paid_at")
+  // Snapshots of amount/currency at payment time, independent of later edits to the parent
+  // RecurringExpense, so historical records never silently change value.
+  amount             Float
+  currency           String
+  expenseId          String?   @map("expense_id")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  recurringExpense RecurringExpense? @relation(fields: [recurringExpenseId], references: [id], onDelete: SetNull)
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Enforces "the same occurrence cannot accidentally be marked paid twice" at the DB level —
+  // relationMode="prisma" still enforces @@unique via an application-level check + a unique
+  // index, same as every other @@unique in this schema.
+  @@unique([recurringExpenseId, scheduledDueDate])
+  @@index([userId])
+  @@map("recurring_expense_payments")
 }
 
 // ─── Goals ───────────────────────────────────────────────────────────────────
@@ -848,6 +948,7 @@ model NotificationPreference {
   budgetWarning   Boolean  @default(true) @map("budget_warning")
   dailyVocabulary Boolean  @default(true) @map("daily_vocabulary")
   weeklySummary   Boolean  @default(true) @map("weekly_summary")
+  recurringExpenseReminder Boolean @default(true) @map("recurring_expense_reminder")
   pushEnabled     Boolean  @default(false) @map("push_enabled")
   emailEnabled    Boolean  @default(false) @map("email_enabled")
   quietHoursStart String?  @map("quiet_hours_start")
