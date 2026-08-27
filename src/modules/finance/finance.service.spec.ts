@@ -1,6 +1,7 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { FinanceService } from './finance.service.js';
+import { FinanceLedgerService } from './finance-ledger.service.js';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService } from '../events/events.service.js';
 
@@ -16,18 +17,24 @@ const mockPrisma = {
 };
 
 const mockEvents = { publish: jest.fn().mockResolvedValue(undefined) };
+// Empty map by default: existing tests below don't assert on balanceBefore/balanceAfter, and
+// mapExpense/mapIncome handle a missing lookup gracefully (null fields) — see the dedicated
+// "balance tracking" describe block and finance-ledger.service.spec.ts for the real ledger math.
+const mockLedger = { computeBalances: jest.fn().mockResolvedValue(new Map()) };
 
 describe('FinanceService', () => {
   let service: FinanceService;
 
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockLedger.computeBalances.mockResolvedValue(new Map());
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         FinanceService,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: EventsService, useValue: mockEvents },
+        { provide: FinanceLedgerService, useValue: mockLedger },
       ],
     }).compile();
 
@@ -439,6 +446,88 @@ describe('FinanceService', () => {
       mockPrisma.expense.findMany.mockResolvedValue([{ amount: dec(15000) }, { amount: dec(9000) }]);
       const avg = await service.getAverageMonthlyExpense('u-1');
       expect(avg).toBeCloseTo(8000, 0);
+    });
+  });
+
+  // ─── Balance tracking (before/after) ───────────────────────────────────────────
+  // The actual running-balance math is unit-tested in finance-ledger.service.spec.ts — these
+  // tests only prove FinanceService correctly wires the ledger's result into every response.
+
+  describe('balance tracking wiring', () => {
+    it('includes balanceBefore/balanceAfter on a newly created expense', async () => {
+      const expense = {
+        id: 'exp-1', userId: 'u-1', categoryId: null, amount: dec(500),
+        currency: 'TWD', expenseDate: new Date(), paymentMethod: 'CASH',
+        sourceModule: 'manual', sourceEntityId: null, note: null, eventId: null,
+        createdAt: new Date(), updatedAt: new Date(), category: null,
+      };
+      mockPrisma.expense.create.mockResolvedValue(expense);
+      mockPrisma.budget.findFirst.mockResolvedValue(null);
+      mockPrisma.expense.findMany.mockResolvedValue([expense]);
+      mockLedger.computeBalances.mockResolvedValue(new Map([['exp-1', { balanceBefore: 10000, balanceAfter: 9500 }]]));
+
+      const result = await service.createExpense('u-1', {
+        amount: 500, expenseDate: '2026-06-10', paymentMethod: 'CASH' as const,
+      });
+
+      expect(result.balanceBefore).toBe('10000');
+      expect(result.balanceAfter).toBe('9500');
+    });
+
+    it('includes balanceBefore/balanceAfter on a newly created income', async () => {
+      const income = {
+        id: 'inc-1', userId: 'u-1', sourceId: null, amount: dec(20000),
+        currency: 'TWD', receivedDate: new Date(), note: null, eventId: null,
+        createdAt: new Date(), updatedAt: new Date(), source: null,
+      };
+      mockPrisma.income.create.mockResolvedValue(income);
+      mockPrisma.budget.findFirst.mockResolvedValue(null);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+      mockLedger.computeBalances.mockResolvedValue(new Map([['inc-1', { balanceBefore: 5000, balanceAfter: 25000 }]]));
+
+      const result = await service.createIncome('u-1', { amount: 20000, receivedDate: '2026-06-15' });
+
+      expect(result.balanceBefore).toBe('5000');
+      expect(result.balanceAfter).toBe('25000');
+    });
+
+    it('annotates every row in findAllExpenses from a single computeBalances call (no N+1)', async () => {
+      const expenses = [
+        { id: 'e1', userId: 'u-1', categoryId: null, amount: dec(200), currency: 'TWD', expenseDate: new Date(), paymentMethod: 'CASH', sourceModule: 'manual', note: null, createdAt: new Date(), updatedAt: new Date(), category: null },
+        { id: 'e2', userId: 'u-1', categoryId: null, amount: dec(100), currency: 'TWD', expenseDate: new Date(), paymentMethod: 'CASH', sourceModule: 'manual', note: null, createdAt: new Date(), updatedAt: new Date(), category: null },
+      ];
+      mockPrisma.expense.findMany.mockResolvedValue(expenses);
+      mockLedger.computeBalances.mockResolvedValue(new Map([
+        ['e1', { balanceBefore: 1500, balanceAfter: 1300 }],
+        ['e2', { balanceBefore: 1300, balanceAfter: 1200 }],
+      ]));
+
+      const result = await service.findAllExpenses('u-1');
+
+      expect(result[0].balanceBefore).toBe('1500');
+      expect(result[0].balanceAfter).toBe('1300');
+      expect(result[1].balanceBefore).toBe('1300');
+      expect(result[1].balanceAfter).toBe('1200');
+      expect(mockLedger.computeBalances).toHaveBeenCalledTimes(1);
+    });
+
+    it('recomputes balances after editing an expense amount', async () => {
+      const existing = {
+        id: 'e1', userId: 'u-1', categoryId: null, amount: dec(200), currency: 'TWD',
+        expenseDate: new Date(), paymentMethod: 'CASH', sourceModule: 'manual', note: null,
+        createdAt: new Date(), updatedAt: new Date(), category: null,
+      };
+      const updated = { ...existing, amount: dec(300) };
+      mockPrisma.expense.findFirst.mockResolvedValue(existing);
+      mockPrisma.expense.update.mockResolvedValue(updated);
+      // The recomputed map reflects the NEW amount (300, not 200) — proves the service asks for
+      // a fresh computeBalances after the mutation rather than reusing an earlier snapshot.
+      mockLedger.computeBalances.mockResolvedValue(new Map([['e1', { balanceBefore: 1500, balanceAfter: 1200 }]]));
+
+      const result = await service.updateExpense('u-1', 'e1', { amount: 300 });
+
+      expect(result.balanceAfter).toBe('1200');
+      expect(mockLedger.computeBalances).toHaveBeenCalledTimes(1);
     });
   });
 });

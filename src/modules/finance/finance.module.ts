@@ -6,6 +6,7 @@ import { NotificationsModule } from '../notifications/notifications.module.js';
 import { RecurrenceService } from '../schedule/recurrence.service.js';
 import { FinanceController } from './finance.controller.js';
 import { FinanceService } from './finance.service.js';
+import { FinanceLedgerService } from './finance-ledger.service.js';
 import { RecurringExpenseController } from './recurring-expense.controller.js';
 import { RecurringExpenseService } from './recurring-expense.service.js';
 import { RecurringExpenseReminderCron } from './recurring-expense-reminder.cron.js';
@@ -13,7 +14,7 @@ import { RecurringExpenseReminderCron } from './recurring-expense-reminder.cron.
 @Module({
   imports: [PrismaModule, EventsModule, AuthModule, NotificationsModule],
   controllers: [FinanceController, RecurringExpenseController],
-  providers: [FinanceService, RecurringExpenseService, RecurrenceService, RecurringExpenseReminderCron],
-  exports: [FinanceService, RecurringExpenseService],
+  providers: [FinanceService, FinanceLedgerService, RecurringExpenseService, RecurrenceService, RecurringExpenseReminderCron],
+  exports: [FinanceService, FinanceLedgerService, RecurringExpenseService],
 })
 export class FinanceModule {}

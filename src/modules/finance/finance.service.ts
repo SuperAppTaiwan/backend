@@ -7,6 +7,7 @@ import {
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
+import { FinanceLedgerService, type LedgerBalances } from './finance-ledger.service.js';
 import { CreateIncomeSourceDto } from './dto/create-income-source.dto.js';
 import { UpdateIncomeSourceDto } from './dto/update-income-source.dto.js';
 import { CreateIncomeDto } from './dto/create-income.dto.js';
@@ -49,6 +50,7 @@ export class FinanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
+    private readonly ledger: FinanceLedgerService,
   ) {}
 
   // ─── Income Sources ──────────────────────────────────────────────────────────
@@ -131,16 +133,20 @@ export class FinanceService {
       payload: { incomeId: income.id, amount: dto.amount, currency: income.currency },
     });
 
-    return this.mapIncome(income);
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapIncome(income, balances.get(income.id));
   }
 
   async findAllIncomes(userId: string) {
-    const incomes = await this.prisma.income.findMany({
-      where: { userId },
-      include: { source: true },
-      orderBy: { receivedDate: 'desc' },
-    });
-    return incomes.map(this.mapIncome);
+    const [incomes, balances] = await Promise.all([
+      this.prisma.income.findMany({
+        where: { userId },
+        include: { source: true },
+        orderBy: { receivedDate: 'desc' },
+      }),
+      this.ledger.computeBalances(userId),
+    ]);
+    return incomes.map((i) => this.mapIncome(i, balances.get(i.id)));
   }
 
   async findOneIncome(userId: string, id: string) {
@@ -149,11 +155,15 @@ export class FinanceService {
       include: { source: true },
     });
     if (!income) throw new NotFoundException('Income not found');
-    return this.mapIncome(income);
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapIncome(income, balances.get(income.id));
   }
 
   async updateIncome(userId: string, id: string, dto: UpdateIncomeDto) {
-    await this.findOneIncome(userId, id);
+    // A lightweight ownership check, not the full findOneIncome() — that also computes the
+    // whole ledger, which would be immediately discarded here since the amount/date this
+    // update is about to change can invalidate it anyway.
+    await this.assertIncomeOwned(userId, id);
     const updated = await this.prisma.income.update({
       where: { id },
       data: {
@@ -173,11 +183,15 @@ export class FinanceService {
       payload: { incomeId: id },
     });
 
-    return this.mapIncome(updated);
+    // Editing amount/date/currency changes this transaction's position and/or magnitude in the
+    // ledger — recomputing here (rather than reusing a stale map) is what makes every later
+    // transaction's balance correct again with zero extra bookkeeping (see finance-ledger.service.ts).
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapIncome(updated, balances.get(updated.id));
   }
 
   async removeIncome(userId: string, id: string) {
-    await this.findOneIncome(userId, id);
+    await this.assertIncomeOwned(userId, id);
     await this.prisma.income.delete({ where: { id } });
 
     await this.events.publish({
@@ -292,16 +306,20 @@ export class FinanceService {
 
     await this.checkBudgetExceeded(userId, expense.currency);
 
-    return this.mapExpense(expense);
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapExpense(expense, balances.get(expense.id));
   }
 
   async findAllExpenses(userId: string) {
-    const expenses = await this.prisma.expense.findMany({
-      where: { userId },
-      include: { category: true },
-      orderBy: { expenseDate: 'desc' },
-    });
-    return expenses.map(this.mapExpense);
+    const [expenses, balances] = await Promise.all([
+      this.prisma.expense.findMany({
+        where: { userId },
+        include: { category: true },
+        orderBy: { expenseDate: 'desc' },
+      }),
+      this.ledger.computeBalances(userId),
+    ]);
+    return expenses.map((e) => this.mapExpense(e, balances.get(e.id)));
   }
 
   async findOneExpense(userId: string, id: string) {
@@ -310,11 +328,14 @@ export class FinanceService {
       include: { category: true },
     });
     if (!expense) throw new NotFoundException('Expense not found');
-    return this.mapExpense(expense);
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapExpense(expense, balances.get(expense.id));
   }
 
   async updateExpense(userId: string, id: string, dto: UpdateExpenseDto) {
-    await this.findOneExpense(userId, id);
+    // Lightweight ownership check — see updateIncome's identical reasoning for why this
+    // doesn't reuse the full findOneExpense() (it would compute a ledger about to go stale).
+    await this.assertExpenseOwned(userId, id);
     const updated = await this.prisma.expense.update({
       where: { id },
       data: {
@@ -335,11 +356,12 @@ export class FinanceService {
       payload: { expenseId: id },
     });
 
-    return this.mapExpense(updated);
+    const balances = await this.ledger.computeBalances(userId);
+    return this.mapExpense(updated, balances.get(updated.id));
   }
 
   async removeExpense(userId: string, id: string) {
-    await this.findOneExpense(userId, id);
+    await this.assertExpenseOwned(userId, id);
     await this.prisma.expense.delete({ where: { id } });
 
     await this.events.publish({
@@ -624,6 +646,16 @@ export class FinanceService {
     return total / 3;
   }
 
+  private async assertIncomeOwned(userId: string, id: string): Promise<void> {
+    const income = await this.prisma.income.findFirst({ where: { id, userId } });
+    if (!income) throw new NotFoundException('Income not found');
+  }
+
+  private async assertExpenseOwned(userId: string, id: string): Promise<void> {
+    const expense = await this.prisma.expense.findFirst({ where: { id, userId } });
+    if (!expense) throw new NotFoundException('Expense not found');
+  }
+
   private async checkBudgetExceeded(userId: string, currency: string) {
     const now = new Date();
     const month = now.getMonth() + 1;
@@ -669,12 +701,14 @@ export class FinanceService {
     currency: string; receivedDate: Date; note: string | null; eventId: string | null;
     createdAt: Date; updatedAt: Date;
     source?: { id: string; name: string } | null;
-  }) {
+  }, balances?: LedgerBalances) {
     return {
       id: i.id, userId: i.userId, sourceId: i.sourceId,
       amount: toStr(i.amount), currency: i.currency,
       receivedDate: i.receivedDate.toISOString(), note: i.note,
       sourceName: i.source?.name ?? null,
+      balanceBefore: toStr(balances?.balanceBefore ?? null),
+      balanceAfter: toStr(balances?.balanceAfter ?? null),
       createdAt: i.createdAt.toISOString(), updatedAt: i.updatedAt.toISOString(),
     };
   }
@@ -698,13 +732,15 @@ export class FinanceService {
     currency: string; expenseDate: Date; paymentMethod: string; sourceModule: string;
     note: string | null; createdAt: Date; updatedAt: Date;
     category?: { id: string; name: string } | null;
-  }) {
+  }, balances?: LedgerBalances) {
     return {
       id: e.id, userId: e.userId, categoryId: e.categoryId,
       amount: toStr(e.amount), currency: e.currency,
       expenseDate: e.expenseDate.toISOString(), paymentMethod: e.paymentMethod,
       sourceModule: e.sourceModule, note: e.note,
       categoryName: e.category?.name ?? null,
+      balanceBefore: toStr(balances?.balanceBefore ?? null),
+      balanceAfter: toStr(balances?.balanceAfter ?? null),
       createdAt: e.createdAt.toISOString(), updatedAt: e.updatedAt.toISOString(),
     };
   }
