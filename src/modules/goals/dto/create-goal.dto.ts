@@ -20,6 +20,12 @@ export class CreateGoalDto {
   @Min(0)
   declare targetAmount?: number;
 
+  @ApiPropertyOptional({ example: 'TWD', description: 'Currency this goal is denominated in — no exchange-rate conversion exists, defaults to TWD' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  declare currency?: string;
+
   @ApiPropertyOptional({ example: '2026-12-31' })
   @IsOptional()
   @IsDateString()

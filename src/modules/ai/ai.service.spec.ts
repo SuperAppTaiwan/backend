@@ -118,11 +118,11 @@ describe('AIService', () => {
   });
 
   it('generates budget exceeded suggestion when expenses > income', async () => {
-    const income = [{ amount: { toString: () => '1000' } }];
-    const expense = [{ amount: { toString: () => '2000' } }];
+    const income = [{ amount: { toString: () => '1000' }, currency: 'TWD' }];
+    const expense = [{ amount: { toString: () => '2000' }, currency: 'TWD' }];
     (prisma.income.findMany as jest.Mock).mockResolvedValue(income);
     (prisma.expense.findMany as jest.Mock).mockResolvedValue(expense);
-    (prisma.budget.findMany as jest.Mock).mockResolvedValue([{ id: 'b1', totalLimit: { toString: () => '3000' } }]);
+    (prisma.budget.findMany as jest.Mock).mockResolvedValue([{ id: 'b1', currency: 'TWD', totalLimit: { toString: () => '3000' } }]);
     (prisma.goal.findMany as jest.Mock).mockResolvedValue([{ id: 'g1', title: 'Test' }]);
     (prisma.goalForecast.findMany as jest.Mock).mockResolvedValue([]);
     (prisma.userVocabularyProgress.findMany as jest.Mock).mockResolvedValue([]);
@@ -140,6 +140,86 @@ describe('AIService', () => {
     const titles = (result.suggestions as { title?: string }[]).map((s) => s.title);
     const hasBudgetSuggestion = titles.some((t) => t?.includes('Chi tiêu vượt') || t?.includes('Chưa có ngân sách'));
     expect(hasBudgetSuggestion).toBe(true);
+  });
+
+  it('flags an over-budget currency without a healthy other currency masking it (or vice versa)', async () => {
+    // TWD is in deficit; VND has a large surplus. A mixed-currency sum would net out to
+    // "healthy" and hide the real TWD problem — the fix must flag TWD specifically.
+    const income = [
+      { amount: { toString: () => '1000' }, currency: 'TWD' },
+      { amount: { toString: () => '90000000' }, currency: 'VND' },
+    ];
+    const expense = [
+      { amount: { toString: () => '5000' }, currency: 'TWD' },
+      { amount: { toString: () => '1000000' }, currency: 'VND' },
+    ];
+    (prisma.income.findMany as jest.Mock).mockResolvedValue(income);
+    (prisma.expense.findMany as jest.Mock).mockResolvedValue(expense);
+    (prisma.budget.findMany as jest.Mock).mockResolvedValue([{ id: 'b1', currency: 'TWD', totalLimit: { toString: () => '3000' } }]);
+    (prisma.goal.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.goalForecast.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.userVocabularyProgress.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.learningPlan.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.notificationPreference.findUnique as jest.Mock).mockResolvedValue({ budgetWarning: true });
+    (prisma.notification.create as jest.Mock).mockResolvedValue({});
+    (prisma.aISuggestion.create as jest.Mock).mockImplementation((args: { data: Record<string, unknown> }) => Promise.resolve({ id: 'sug-x', ...args.data }));
+    (prisma.recommendationLog.create as jest.Mock).mockResolvedValue({});
+    (prisma.aIProfile.upsert as jest.Mock).mockResolvedValue(makeProfile());
+    (prisma.reviewSession.findMany as jest.Mock).mockResolvedValue([]);
+
+    const result = await service.generateRecommendations(USER_ID);
+    const messages = (result.suggestions as { message?: string }[]).map((s) => s.message ?? '');
+    expect(messages.some((m) => m.includes('TWD'))).toBe(true);
+    expect(messages.some((m) => m.includes('4000 TWD') || m.includes('4.000 TWD'))).toBe(true);
+    // The VND surplus must never appear in a "vượt thu nhập" (over-income) message.
+    expect(messages.some((m) => m.includes('vượt thu nhập') && m.includes('VND'))).toBe(false);
+  });
+
+  it('computes financialHealthScore from per-currency savings ratios, never a mixed-currency sum', async () => {
+    // VND: huge surplus (would push score near 100 if summed in). TWD: deficit (would drag
+    // score down). If these were summed as raw amounts first, the VND volume would swamp the
+    // TWD deficit; averaging per-currency scores keeps both currencies' health independently
+    // visible instead.
+    const income = [
+      { amount: { toString: () => '100000000' }, currency: 'VND' },
+      { amount: { toString: () => '1000' }, currency: 'TWD' },
+    ];
+    const expense = [
+      { amount: { toString: () => '1000000' }, currency: 'VND' },
+      { amount: { toString: () => '5000' }, currency: 'TWD' },
+    ];
+    (prisma.income.findMany as jest.Mock).mockResolvedValue(income);
+    (prisma.expense.findMany as jest.Mock).mockResolvedValue(expense);
+    (prisma.budget.findMany as jest.Mock).mockResolvedValue([{ id: 'b1', currency: 'TWD', totalLimit: { toString: () => '3000' } }]);
+    (prisma.goal.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.goalForecast.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.userVocabularyProgress.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.learningPlan.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
+    (prisma.notificationPreference.findUnique as jest.Mock).mockResolvedValue({});
+    (prisma.notification.create as jest.Mock).mockResolvedValue({});
+    (prisma.aISuggestion.create as jest.Mock).mockImplementation((args: { data: Record<string, unknown> }) => Promise.resolve({ id: 'sug-x', ...args.data }));
+    (prisma.recommendationLog.create as jest.Mock).mockResolvedValue({});
+    let upsertArgs: { create: Record<string, unknown> } | null = null;
+    (prisma.aIProfile.upsert as jest.Mock).mockImplementation((args) => {
+      upsertArgs = args;
+      return Promise.resolve(makeProfile());
+    });
+    (prisma.reviewSession.findMany as jest.Mock).mockResolvedValue([]);
+
+    await service.generateRecommendations(USER_ID);
+
+    expect(upsertArgs).not.toBeNull();
+    const score = (upsertArgs!.create as { financialHealthScore: number }).financialHealthScore;
+    // VND ratio: (100M-1M)/100M ~ 0.99 -> score ~99.5. TWD ratio: (1000-5000)/1000 = -4 -> score
+    // clamped to 0. Average of ~99.5 and 0 is ~50 — nowhere near what a naive mixed-currency sum
+    // would produce (VND volume would completely dominate and hide the TWD deficit).
+    expect(score).toBeGreaterThan(30);
+    expect(score).toBeLessThan(70);
+    const profileJson = (upsertArgs!.create as { profileJson: { incomeByCurrency: Record<string, number> } }).profileJson;
+    expect(profileJson.incomeByCurrency.VND).toBe(100000000);
+    expect(profileJson.incomeByCurrency.TWD).toBe(1000);
   });
 
   it('generates overdue task suggestion', async () => {
@@ -256,8 +336,8 @@ describe('AIService', () => {
       (prisma.aIProfile.findUnique as jest.Mock).mockResolvedValue(makeProfile());
       (prisma.userVocabularyProgress.count as jest.Mock).mockResolvedValue(4);
       (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
-      (prisma.income.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '25000' } }]);
-      (prisma.expense.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '9000' } }]);
+      (prisma.income.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '25000' }, currency: 'TWD' }]);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([{ amount: { toString: () => '9000' }, currency: 'TWD' }]);
       (prisma.task.count as jest.Mock)
         .mockResolvedValueOnce(2) // overdue
         .mockResolvedValueOnce(5); // completed this week
@@ -267,7 +347,78 @@ describe('AIService', () => {
       // Real net savings (25000-9000=16000) surfaces via the deterministic provider's
       // finance line, not the old hardcoded netSavings:0.
       expect(result.summary).toContain('16.000');
+      expect(result.summary).toContain('TWD');
       expect(result.provider).toBeDefined();
+    });
+
+    it('keeps VND and TWD net savings separate in the summary, never combined', async () => {
+      (prisma.aISuggestion.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.aIProfile.findUnique as jest.Mock).mockResolvedValue(makeProfile());
+      (prisma.userVocabularyProgress.count as jest.Mock).mockResolvedValue(0);
+      (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.income.findMany as jest.Mock).mockResolvedValue([
+        { amount: { toString: () => '60000000' }, currency: 'VND' },
+        { amount: { toString: () => '10000' }, currency: 'TWD' },
+      ]);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([
+        { amount: { toString: () => '5000000' }, currency: 'VND' },
+        { amount: { toString: () => '2000' }, currency: 'TWD' },
+      ]);
+      (prisma.task.count as jest.Mock).mockResolvedValueOnce(0).mockResolvedValueOnce(0);
+
+      const result = await service.getDailySummary(USER_ID);
+
+      expect(result.summary).toContain('55.000.000 VND');
+      expect(result.summary).toContain('8.000 TWD');
+      // Never a cross-currency blend like 60,010,000 or 55,008,000.
+      expect(result.summary).not.toContain('60.010.000');
+      expect(result.summary).not.toContain('55.008.000');
+    });
+  });
+
+  describe('getWeeklyReport', () => {
+    it('groups the week\'s expenses by currency instead of one mixed total', async () => {
+      (prisma.task.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.reviewSession.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.aISuggestion.findMany as jest.Mock).mockResolvedValue([]);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([
+        { amount: { toString: () => '60000000' }, currency: 'VND' },
+        { amount: { toString: () => '10000' }, currency: 'TWD' },
+      ]);
+
+      const result = await service.getWeeklyReport(USER_ID);
+
+      expect(result.finance.expenseByCurrency.VND).toBe(60000000);
+      expect(result.finance.expenseByCurrency.TWD).toBe(10000);
+    });
+  });
+
+  describe('analyzeBudget', () => {
+    it('scopes totalExpense to the budget\'s own currency, ignoring other currencies entirely', async () => {
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([
+        { amount: { toString: () => '6000' }, currency: 'TWD' },
+        { amount: { toString: () => '50000000' }, currency: 'VND' },
+      ]);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([
+        { id: 'b1', currency: 'TWD', totalLimit: { toString: () => '20000' } },
+      ]);
+
+      const result = await service.analyzeBudget(USER_ID);
+
+      expect(result.totalExpense).toBe(6000);
+      expect(result.usedPercent).toBe(30);
+    });
+
+    it('returns a zero (not mixed-currency) total when no budget exists', async () => {
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue([
+        { amount: { toString: () => '6000' }, currency: 'TWD' },
+        { amount: { toString: () => '50000000' }, currency: 'VND' },
+      ]);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.analyzeBudget(USER_ID);
+
+      expect(result.totalExpense).toBe(0);
     });
   });
 

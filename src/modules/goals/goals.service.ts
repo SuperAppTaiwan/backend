@@ -41,6 +41,7 @@ export class GoalsService {
         goalType: dto.goalType,
         title: dto.title,
         targetAmount: dto.targetAmount,
+        currency: dto.currency ?? 'TWD',
         targetDate: dto.targetDate ? new Date(dto.targetDate) : null,
         priority: dto.priority ?? 'MEDIUM',
         metadataJson: dto.metadataJson as Prisma.InputJsonValue,
@@ -80,6 +81,7 @@ export class GoalsService {
         ...(dto.title !== undefined && { title: dto.title }),
         ...(dto.targetAmount !== undefined && { targetAmount: dto.targetAmount }),
         ...(dto.currentAmount !== undefined && { currentAmount: dto.currentAmount }),
+        ...(dto.currency !== undefined && { currency: dto.currency }),
         ...(dto.targetDate !== undefined && { targetDate: new Date(dto.targetDate) }),
         ...(dto.priority !== undefined && { priority: dto.priority }),
         ...(dto.status !== undefined && { status: dto.status }),
@@ -207,9 +209,11 @@ export class GoalsService {
     const goal = await this.prisma.goal.findFirst({ where: { id: goalId, userId } });
     if (!goal) throw new NotFoundException('Goal not found');
 
+    // Both averages are scoped to THIS goal's own currency — a VND goal must never be
+    // projected using TWD (or any other currency's) income/expense data, and vice versa.
     const [avgIncome, avgExpense] = await Promise.all([
-      this.financeService.getAverageMonthlyIncome(userId),
-      this.financeService.getAverageMonthlyExpense(userId),
+      this.financeService.getAverageMonthlyIncome(userId, goal.currency),
+      this.financeService.getAverageMonthlyExpense(userId, goal.currency),
     ]);
 
     const targetAmount = goal.targetAmount ? toNum(goal.targetAmount) : null;
@@ -245,12 +249,13 @@ export class GoalsService {
       riskLevel = probability >= 75 ? 'LOW' : probability >= 40 ? 'MEDIUM' : 'HIGH';
 
       const shortfall = requiredMonthlySaving - currentMonthlySaving;
+      const c = goal.currency;
       if (probability >= 75) {
-        aiReason = `You are on track. Current monthly savings (${Math.round(currentMonthlySaving)} TWD) meet the required ${Math.round(requiredMonthlySaving)} TWD/month.`;
+        aiReason = `You are on track. Current monthly savings (${Math.round(currentMonthlySaving)} ${c}) meet the required ${Math.round(requiredMonthlySaving)} ${c}/month.`;
       } else if (probability >= 40) {
-        aiReason = `Moderate risk. You need ${Math.round(requiredMonthlySaving)} TWD/month but currently save ${Math.round(currentMonthlySaving)} TWD/month. Reduce expenses by ${Math.round(shortfall)} TWD to stay on track.`;
+        aiReason = `Moderate risk. You need ${Math.round(requiredMonthlySaving)} ${c}/month but currently save ${Math.round(currentMonthlySaving)} ${c}/month. Reduce expenses by ${Math.round(shortfall)} ${c} to stay on track.`;
       } else {
-        aiReason = `High risk. ${currentMonthlySaving <= 0 ? 'Your expenses exceed your income.' : `You need ${Math.round(requiredMonthlySaving)} TWD/month but can only save ${Math.round(currentMonthlySaving)} TWD/month.`} Consider extending your target date or increasing income.`;
+        aiReason = `High risk. ${currentMonthlySaving <= 0 ? 'Your expenses exceed your income.' : `You need ${Math.round(requiredMonthlySaving)} ${c}/month but can only save ${Math.round(currentMonthlySaving)} ${c}/month.`} Consider extending your target date or increasing income.`;
       }
     }
 
@@ -291,11 +296,13 @@ export class GoalsService {
     const goal = await this.prisma.goal.findFirst({ where: { id: goalId, userId } });
     if (!goal) throw new NotFoundException('Goal not found');
 
+    // Scoped to this goal's own currency — see generateForecast's identical reasoning.
     const [avgIncome, avgExpense] = await Promise.all([
-      this.financeService.getAverageMonthlyIncome(userId),
-      this.financeService.getAverageMonthlyExpense(userId),
+      this.financeService.getAverageMonthlyIncome(userId, goal.currency),
+      this.financeService.getAverageMonthlyExpense(userId, goal.currency),
     ]);
 
+    const c = goal.currency;
     const recommendations: string[] = [];
 
     if (avgIncome === 0 && avgExpense === 0) {
@@ -321,12 +328,12 @@ export class GoalsService {
       recommendations.push('Consider finding additional income sources (freelance, tutoring, etc.).');
     } else if (currentMonthlySaving < requiredMonthlySaving) {
       const shortfall = Math.round(requiredMonthlySaving - currentMonthlySaving);
-      recommendations.push(`You need to save ${Math.round(requiredMonthlySaving)} TWD/month but currently save ${Math.round(currentMonthlySaving)} TWD/month. Find ${shortfall} TWD extra per month.`);
+      recommendations.push(`You need to save ${Math.round(requiredMonthlySaving)} ${c}/month but currently save ${Math.round(currentMonthlySaving)} ${c}/month. Find ${shortfall} ${c} extra per month.`);
       recommendations.push('Review your expense categories and identify items to reduce (entertainment, dining out, etc.).');
       recommendations.push('Consider extending your target date to reduce monthly pressure.');
       recommendations.push('Look for ways to increase income: overtime, freelance projects, or selling unused items.');
     } else {
-      recommendations.push(`You are on track! Maintain your current savings rate of ${Math.round(currentMonthlySaving)} TWD/month.`);
+      recommendations.push(`You are on track! Maintain your current savings rate of ${Math.round(currentMonthlySaving)} ${c}/month.`);
       recommendations.push('Consider automating savings transfers on payday to avoid spending temptation.');
       if (currentMonthlySaving > requiredMonthlySaving * 1.2) {
         recommendations.push('You are saving more than required — consider investing the surplus for higher returns.');
@@ -340,13 +347,14 @@ export class GoalsService {
 
   private mapGoal(g: {
     id: string; userId: string; goalType: string; title: string;
-    targetAmount: DecimalLike; currentAmount: DecimalLike; targetDate: Date | null;
+    targetAmount: DecimalLike; currentAmount: DecimalLike; currency: string; targetDate: Date | null;
     priority: string; status: string; metadataJson: unknown;
     createdAt: Date; updatedAt: Date;
   }) {
     return {
       id: g.id, userId: g.userId, goalType: g.goalType, title: g.title,
       targetAmount: toStr(g.targetAmount), currentAmount: toStr(g.currentAmount),
+      currency: g.currency,
       targetDate: g.targetDate?.toISOString() ?? null, priority: g.priority,
       status: g.status, metadataJson: g.metadataJson,
       createdAt: g.createdAt.toISOString(), updatedAt: g.updatedAt.toISOString(),

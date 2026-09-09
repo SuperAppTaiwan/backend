@@ -21,7 +21,9 @@
     "db:migrate:prod": "prisma db push",
     "db:studio": "prisma studio",
     "db:seed": "ts-node prisma/seed.ts",
-    "seed:finance-demo": "ts-node scripts/seed-finance-demo.ts"
+    "seed:finance-demo": "ts-node scripts/seed-finance-demo.ts",
+    "seed:goals-demo": "ts-node scripts/seed-goals-demo.ts",
+    "backfill:goal-currency": "ts-node scripts/backfill-goal-currency.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

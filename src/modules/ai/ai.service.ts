@@ -5,6 +5,7 @@ import { EventsService, EventType } from '../events/events.service.js';
 import { DeterministicAIProvider } from './providers/deterministic-ai.provider.js';
 import { AIProviderChain } from './providers/ai-provider-chain.service.js';
 import type { AIChatMessage } from './providers/ai-provider.interface.js';
+import { sumByCurrency, filterByCurrency } from '../finance/finance-currency.util.js';
 
 interface SuggestionInput {
   type: AISuggestionType;
@@ -62,13 +63,31 @@ export class AIService {
     const planList = learningPlans.status === 'fulfilled' ? learningPlans.value : [];
     const goalList = goals.status === 'fulfilled' ? goals.value : [];
 
-    const totalIncome = incomeList.reduce((s, i) => s + parseFloat(i.amount.toString()), 0);
-    const totalExpense = expenseList.reduce((s, e) => s + parseFloat(e.amount.toString()), 0);
+    // No exchange-rate conversion exists in this app — summing raw amounts across currencies
+    // (e.g. 20,000,000 VND + 20,000 TWD) would be meaningless, so income/expense are grouped
+    // per currency first. financialHealthScore is a single dimensionless 0-100 gauge, which
+    // (unlike a raw amount) CAN be safely combined across currencies: it's computed as each
+    // currency's own savings-rate score, averaged — never as a score derived from a mixed-
+    // currency money total.
+    const incomeByCurrency = sumByCurrency(incomeList, (i) => parseFloat(i.amount.toString()), (i) => i.currency);
+    const expenseByCurrency = sumByCurrency(expenseList, (e) => parseFloat(e.amount.toString()), (e) => e.currency);
+    const currencies = new Set([...Object.keys(incomeByCurrency), ...Object.keys(expenseByCurrency)]);
+    const savingsByCurrency: Record<string, number> = {};
+    for (const c of currencies) {
+      savingsByCurrency[c] = (incomeByCurrency[c] ?? 0) - (expenseByCurrency[c] ?? 0);
+    }
+
     const hasBudget = budgetList.length > 0;
-    const savings = totalIncome - totalExpense;
-    const financialHealthScore = hasBudget
-      ? Math.min(100, Math.max(0, Math.round(50 + (savings / Math.max(totalIncome, 1)) * 50)))
-      : 30;
+    const perCurrencyScores = [...currencies].map((c) => {
+      const income = incomeByCurrency[c] ?? 0;
+      const savings = savingsByCurrency[c];
+      return Math.min(100, Math.max(0, Math.round(50 + (savings / Math.max(income, 1)) * 50)));
+    });
+    const financialHealthScore = !hasBudget
+      ? 30
+      : perCurrencyScores.length > 0
+        ? Math.round(perCurrencyScores.reduce((s, v) => s + v, 0) / perCurrencyScores.length)
+        : 30;
 
     const completedTasks = taskList.filter((t) => t.status === 'COMPLETED').length;
     const totalTasks = taskList.length;
@@ -86,9 +105,9 @@ export class AIService {
 
     const profileJson: Prisma.InputJsonValue = {
       computedAt: new Date().toISOString(),
-      totalIncome,
-      totalExpense,
-      savings,
+      incomeByCurrency,
+      expenseByCurrency,
+      savingsByCurrency,
       hasBudget,
       activePlans: planList.length,
       activeGoals: goalList.length,
@@ -122,18 +141,24 @@ export class AIService {
         this.prisma.budget.findMany({ where: { userId } }),
       ]);
 
-      const totalIncome = incomes.reduce((s, i) => s + parseFloat(i.amount.toString()), 0);
-      const totalExpense = expenses.reduce((s, e) => s + parseFloat(e.amount.toString()), 0);
-      const netSavings = totalIncome - totalExpense;
-
       if (budgets.length === 0) {
         suggestions.push({ type: 'FINANCE', title: 'Chưa có ngân sách', message: 'Tạo ngân sách tháng giúp bạn kiểm soát chi tiêu hiệu quả hơn.', priority: 'MEDIUM', sourceModule: 'finance' });
       }
 
-      if (netSavings < 0) {
-        suggestions.push({ type: 'FINANCE', title: 'Chi tiêu vượt thu nhập', message: `Chi tiêu tháng này vượt thu nhập ${Math.abs(netSavings).toFixed(0)} TWD. Hãy rà soát các khoản chi không cần thiết.`, priority: 'HIGH', sourceModule: 'finance' });
-      } else if (totalIncome > 0 && netSavings / totalIncome < 0.1) {
-        suggestions.push({ type: 'FINANCE', title: 'Tỷ lệ tiết kiệm thấp', message: 'Tỷ lệ tiết kiệm dưới 10%. Mục tiêu lý tưởng là 20-30% thu nhập.', priority: 'MEDIUM', sourceModule: 'finance' });
+      // No exchange-rate conversion exists in this app — evaluated independently per currency,
+      // never as one mixed-currency total, so a suggestion about "chi tiêu vượt thu nhập" always
+      // names the currency it's actually true for.
+      const incomeByCurrency = sumByCurrency(incomes, (i) => parseFloat(i.amount.toString()), (i) => i.currency);
+      const expenseByCurrency = sumByCurrency(expenses, (e) => parseFloat(e.amount.toString()), (e) => e.currency);
+      const currencies = new Set([...Object.keys(incomeByCurrency), ...Object.keys(expenseByCurrency)]);
+      for (const c of currencies) {
+        const totalIncome = incomeByCurrency[c] ?? 0;
+        const netSavings = totalIncome - (expenseByCurrency[c] ?? 0);
+        if (netSavings < 0) {
+          suggestions.push({ type: 'FINANCE', title: 'Chi tiêu vượt thu nhập', message: `Chi tiêu tháng này vượt thu nhập ${Math.abs(netSavings).toFixed(0)} ${c}. Hãy rà soát các khoản chi không cần thiết.`, priority: 'HIGH', sourceModule: 'finance' });
+        } else if (totalIncome > 0 && netSavings / totalIncome < 0.1) {
+          suggestions.push({ type: 'FINANCE', title: `Tỷ lệ tiết kiệm thấp (${c})`, message: `Tỷ lệ tiết kiệm ${c} dưới 10%. Mục tiêu lý tưởng là 20-30% thu nhập.`, priority: 'MEDIUM', sourceModule: 'finance' });
+        }
       }
     } catch (err) {
       this.logger.warn('Finance analysis failed', err);
@@ -323,14 +348,20 @@ export class AIService {
       ]);
 
     const toAmount = (v: { toString(): string }) => parseFloat(v.toString());
-    const netSavings =
-      monthIncomes.status === 'fulfilled' && monthExpenses.status === 'fulfilled'
-        ? monthIncomes.value.reduce((s, i) => s + toAmount(i.amount), 0) -
-          monthExpenses.value.reduce((s, e) => s + toAmount(e.amount), 0)
-        : 0;
+    // No exchange-rate conversion exists in this app — a per-currency breakdown, never one
+    // mixed-currency total (see deterministic-ai.provider.ts's generateSummary for how this is
+    // phrased in the actual summary text).
+    const netSavingsByCurrency: Record<string, number> = {};
+    if (monthIncomes.status === 'fulfilled' && monthExpenses.status === 'fulfilled') {
+      const incomeByCurrency = sumByCurrency(monthIncomes.value, (i) => toAmount(i.amount), (i) => i.currency);
+      const expenseByCurrency = sumByCurrency(monthExpenses.value, (e) => toAmount(e.amount), (e) => e.currency);
+      for (const c of new Set([...Object.keys(incomeByCurrency), ...Object.keys(expenseByCurrency)])) {
+        netSavingsByCurrency[c] = Math.round((incomeByCurrency[c] ?? 0) - (expenseByCurrency[c] ?? 0));
+      }
+    }
 
     const context = {
-      finance: { netSavings: Math.round(netSavings) },
+      finance: { netSavingsByCurrency },
       learning: { reviewDueCount: learningProgress.status === 'fulfilled' ? learningProgress.value : 0 },
       schedule: {
         overdueTasks: overdueTaskCount.status === 'fulfilled' ? overdueTaskCount.value : 0,
@@ -379,13 +410,14 @@ export class AIService {
     const expenseList = expenses.status === 'fulfilled' ? expenses.value : [];
 
     const completedTasks = taskList.filter((t) => t.status === 'COMPLETED').length;
-    const totalExpense = expenseList.reduce((s, e) => s + parseFloat(e.amount.toString()), 0);
+    // No exchange-rate conversion exists in this app — per currency, never one mixed total.
+    const expenseByCurrency = sumByCurrency(expenseList, (e) => parseFloat(e.amount.toString()), (e) => e.currency);
 
     return {
       period: { from: weekStart.toISOString(), to: new Date().toISOString() },
       tasks: { total: taskList.length, completed: completedTasks, completionRate: taskList.length > 0 ? Math.round((completedTasks / taskList.length) * 100) : 0 },
       learning: { reviewSessions: reviewList.length, correctRate: reviewList.length > 0 ? Math.round(reviewList.filter((r) => r.result === 'GOOD' || r.result === 'EASY').length / reviewList.length * 100) : 0 },
-      finance: { totalExpense },
+      finance: { expenseByCurrency },
       suggestions: { generated: suggestionList.length, accepted: suggestionList.filter((s) => s.status === 'ACCEPTED').length, dismissed: suggestionList.filter((s) => s.status === 'DISMISSED').length },
     };
   }
@@ -535,7 +567,14 @@ export class AIService {
       this.prisma.budget.findMany({ where: { userId } }),
     ]);
 
-    const totalExpense = expenses.reduce((s, e) => s + parseFloat(e.amount.toString()), 0);
+    // A Budget is single-currency (budgets[0].currency); only expenses in that same currency
+    // may count toward it — a TWD budget must never be "80% used" because of VND spending.
+    // Matches finance.service.ts's getBudgetStatus: with no budget there's no currency context
+    // to report a meaningful total in, so totalExpense is 0 rather than a mixed-currency sum.
+    const budgetCurrency = budgets[0]?.currency;
+    const totalExpense = budgetCurrency
+      ? filterByCurrency(expenses, budgetCurrency, (e) => e.currency).reduce((s, e) => s + parseFloat(e.amount.toString()), 0)
+      : 0;
     const budgetAmount = budgets[0]?.totalLimit ? parseFloat(budgets[0].totalLimit.toString()) : 0;
     const suggestions: string[] = [];
 

@@ -32,3 +32,10 @@ export function groupByCurrency<T>(items: T[], getCurrency: (item: T) => string)
   }
   return result;
 }
+
+/** Keeps only the items matching one specific currency — for call sites that already know
+ * which single currency they care about (e.g. scoping a budget's expense total to the budget's
+ * own currency), rather than needing the full group-by-every-currency breakdown. */
+export function filterByCurrency<T>(items: T[], currency: string, getCurrency: (item: T) => string): T[] {
+  return items.filter((item) => getCurrency(item) === currency);
+}

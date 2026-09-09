@@ -563,6 +563,12 @@ model RecurringExpensePayment {
 
 // ─── Goals ───────────────────────────────────────────────────────────────────
 
+// currency: the single currency this goal's targetAmount/currentAmount are denominated in (no
+// exchange-rate conversion system exists in this app — see finance-currency.util.ts). Defaults
+// to "TWD" for consistency with Income/Expense/Budget/IncomeSource, which all default the same
+// way. MongoDB does NOT retroactively backfill existing documents when a `@default` is added to
+// the schema — any Goal created before this field existed needs an explicit backfill (see
+// scripts/backfill-goal-currency.ts) or reads of it will fail validation.
 model Goal {
   id            String       @id @default(cuid()) @map("_id")
   userId        String       @map("user_id")
@@ -570,6 +576,7 @@ model Goal {
   title         String
   targetAmount  Float?       @map("target_amount")
   currentAmount Float        @default(0) @map("current_amount")
+  currency      String       @default("TWD")
   targetDate    DateTime?    @map("target_date")
   priority      GoalPriority @default(MEDIUM)
   status        GoalStatus   @default(ACTIVE)

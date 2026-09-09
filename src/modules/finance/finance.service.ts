@@ -701,30 +701,30 @@ export class FinanceService {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-  // NOTE: getAverageMonthlyIncome/getAverageMonthlyExpense below intentionally still sum across
-  // currencies — they exist only to feed Goal projections (goals.service.ts), a module the
-  // currency-separation fix in this pass was not scoped to touch. Making Goal projections
-  // currency-aware would require changes to the Goal model/UI (which currency is a savings goal
-  // even denominated in?) that belong to a dedicated Goals-module pass, not this Finance one.
-  async getAverageMonthlyIncome(userId: string): Promise<number> {
+  // Both methods are currency-scoped — a required `currency` param, filtered at the query level
+  // — since their only caller (goals.service.ts's forecast/recommendation logic) must never let
+  // a goal's projection be influenced by a different currency's income/expense. Previously these
+  // summed ALL currencies together with no filter at all, which is exactly the class of bug this
+  // pass eliminates: see finance-currency.util.ts for the shared reasoning.
+  async getAverageMonthlyIncome(userId: string, currency: string): Promise<number> {
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const incomes = await this.prisma.income.findMany({
-      where: { userId, receivedDate: { gte: threeMonthsAgo, lt: thisMonthStart } },
+      where: { userId, currency, receivedDate: { gte: threeMonthsAgo, lt: thisMonthStart } },
     });
     const total = incomes.reduce((sum, i) => sum + toNum(i.amount), 0);
     return total / 3;
   }
 
-  async getAverageMonthlyExpense(userId: string): Promise<number> {
+  async getAverageMonthlyExpense(userId: string, currency: string): Promise<number> {
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     const expenses = await this.prisma.expense.findMany({
-      where: { userId, expenseDate: { gte: threeMonthsAgo, lt: thisMonthStart } },
+      where: { userId, currency, expenseDate: { gte: threeMonthsAgo, lt: thisMonthStart } },
     });
     const total = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
     return total / 3;

@@ -551,8 +551,16 @@ describe('FinanceService', () => {
       mockPrisma.income.findMany.mockResolvedValue([
         { amount: dec(30000) }, { amount: dec(30000) },
       ]);
-      const avg = await service.getAverageMonthlyIncome('u-1');
+      const avg = await service.getAverageMonthlyIncome('u-1', 'TWD');
       expect(avg).toBeCloseTo(20000, 0);
+    });
+
+    it('filters the query by the given currency, at the database level', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([]);
+      await service.getAverageMonthlyIncome('u-1', 'VND');
+      expect(mockPrisma.income.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ currency: 'VND' }) }),
+      );
     });
   });
 
@@ -563,8 +571,16 @@ describe('FinanceService', () => {
 
     it('returns 3-month average expense', async () => {
       mockPrisma.expense.findMany.mockResolvedValue([{ amount: dec(15000) }, { amount: dec(9000) }]);
-      const avg = await service.getAverageMonthlyExpense('u-1');
+      const avg = await service.getAverageMonthlyExpense('u-1', 'TWD');
       expect(avg).toBeCloseTo(8000, 0);
+    });
+
+    it('filters the query by the given currency, at the database level', async () => {
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+      await service.getAverageMonthlyExpense('u-1', 'VND');
+      expect(mockPrisma.expense.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ currency: 'VND' }) }),
+      );
     });
   });
 

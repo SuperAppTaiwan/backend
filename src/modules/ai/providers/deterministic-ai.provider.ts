@@ -52,13 +52,16 @@ export class DeterministicAIProvider implements AIProvider {
     const parts: string[] = [];
 
     const finance = ctx.finance as Record<string, unknown> | undefined;
-    if (finance) {
-      const savings = Number(finance.netSavings ?? 0);
-      if (savings < 0) {
-        parts.push(`Tài chính: chi tiêu vượt thu nhập ${Math.abs(savings).toLocaleString('vi-VN')} TWD.`);
-      } else {
-        parts.push(`Tài chính: tiết kiệm được ${savings.toLocaleString('vi-VN')} TWD tháng này.`);
-      }
+    const netSavingsByCurrency = finance?.netSavingsByCurrency as Record<string, number> | undefined;
+    // No exchange-rate conversion exists in this app — each currency's savings/deficit is
+    // reported on its own clause, never summed into one mixed-currency figure.
+    if (netSavingsByCurrency && Object.keys(netSavingsByCurrency).length > 0) {
+      const clauses = Object.entries(netSavingsByCurrency).map(([currency, savings]) =>
+        savings < 0
+          ? `chi tiêu vượt thu nhập ${Math.abs(savings).toLocaleString('vi-VN')} ${currency}`
+          : `tiết kiệm được ${savings.toLocaleString('vi-VN')} ${currency}`,
+      );
+      parts.push(`Tài chính: ${clauses.join(', ')} tháng này.`);
     }
 
     const learning = ctx.learning as Record<string, unknown> | undefined;

@@ -26,6 +26,12 @@ export class UpdateGoalDto {
   @Min(0)
   declare currentAmount?: number;
 
+  @ApiPropertyOptional({ example: 'TWD', description: 'Currency this goal is denominated in — no exchange-rate conversion exists' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  declare currency?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
