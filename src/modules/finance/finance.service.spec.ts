@@ -20,7 +20,10 @@ const mockEvents = { publish: jest.fn().mockResolvedValue(undefined) };
 // Empty map by default: existing tests below don't assert on balanceBefore/balanceAfter, and
 // mapExpense/mapIncome handle a missing lookup gracefully (null fields) — see the dedicated
 // "balance tracking" describe block and finance-ledger.service.spec.ts for the real ledger math.
-const mockLedger = { computeBalances: jest.fn().mockResolvedValue(new Map()) };
+const mockLedger = {
+  computeBalances: jest.fn().mockResolvedValue(new Map()),
+  getCurrentBalances: jest.fn().mockResolvedValue({}),
+};
 
 describe('FinanceService', () => {
   let service: FinanceService;
@@ -28,6 +31,7 @@ describe('FinanceService', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockLedger.computeBalances.mockResolvedValue(new Map());
+    mockLedger.getCurrentBalances.mockResolvedValue({});
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -185,29 +189,90 @@ describe('FinanceService', () => {
   // ─── Monthly Report ───────────────────────────────────────────────────────────
 
   describe('getMonthlyReport', () => {
-    it('calculates totals correctly', async () => {
+    it('calculates totals correctly for a single-currency user', async () => {
       const incomes = [
-        { id: 'i1', amount: dec(30000), source: { name: 'Salary' } },
-        { id: 'i2', amount: dec(5000), source: null },
+        { id: 'i1', amount: dec(30000), currency: 'TWD', source: { name: 'Salary' } },
+        { id: 'i2', amount: dec(5000), currency: 'TWD', source: null },
       ];
       const expenses = [
-        { id: 'e1', amount: dec(10000), category: { name: 'Rent' } },
-        { id: 'e2', amount: dec(3000), category: { name: 'Food' } },
+        { id: 'e1', amount: dec(10000), currency: 'TWD', category: { name: 'Rent' } },
+        { id: 'e2', amount: dec(3000), currency: 'TWD', category: { name: 'Food' } },
       ];
       mockPrisma.income.findMany.mockResolvedValue(incomes);
       mockPrisma.expense.findMany.mockResolvedValue(expenses);
       mockPrisma.budget.findFirst.mockResolvedValue({
         totalLimit: dec(40000), currency: 'TWD',
       });
+      mockLedger.getCurrentBalances.mockResolvedValue({ TWD: 22000 });
 
       const result = await service.getMonthlyReport('u-1', 6, 2026);
 
-      expect(result.totalIncome).toBe(35000);
-      expect(result.totalExpense).toBe(13000);
-      expect(result.netSavings).toBe(22000);
-      expect(result.expenseByCategory['Rent']).toBe(10000);
-      expect(result.incomeBySource['Salary']).toBe(30000);
-      expect(result.budgetUsedPercent).toBe(33);
+      const twd = result.currencies['TWD'];
+      expect(twd.totalIncome).toBe(35000);
+      expect(twd.totalExpense).toBe(13000);
+      expect(twd.netSavings).toBe(22000);
+      expect(twd.currentBalance).toBe(22000);
+      expect(twd.expenseByCategory['Rent']).toBe(10000);
+      expect(twd.incomeBySource['Salary']).toBe(30000);
+      expect(twd.budgetUsedPercent).toBe(33);
+    });
+
+    it('keeps VND and TWD completely separate, never summed together', async () => {
+      const incomes = [
+        { id: 'i1', amount: dec(60000000), currency: 'VND', source: null },
+        { id: 'i2', amount: dec(10000), currency: 'TWD', source: null },
+      ];
+      const expenses = [
+        { id: 'e1', amount: dec(5000000), currency: 'VND', category: null },
+        { id: 'e2', amount: dec(2000), currency: 'TWD', category: null },
+      ];
+      mockPrisma.income.findMany.mockResolvedValue(incomes);
+      mockPrisma.expense.findMany.mockResolvedValue(expenses);
+      mockPrisma.budget.findFirst.mockResolvedValue(null);
+      mockLedger.getCurrentBalances.mockResolvedValue({ VND: 55000000, TWD: 8000 });
+
+      const result = await service.getMonthlyReport('u-1', 6, 2026);
+
+      expect(Object.keys(result.currencies).sort()).toEqual(['TWD', 'VND']);
+      expect(result.currencies['VND'].totalIncome).toBe(60000000);
+      expect(result.currencies['VND'].totalExpense).toBe(5000000);
+      expect(result.currencies['VND'].currentBalance).toBe(55000000);
+      expect(result.currencies['TWD'].totalIncome).toBe(10000);
+      expect(result.currencies['TWD'].totalExpense).toBe(2000);
+      expect(result.currencies['TWD'].currentBalance).toBe(8000);
+      // Never 60000000 + 10000 or any cross-currency sum.
+      expect(result.currencies['VND'].totalIncome).not.toBe(60010000);
+    });
+
+    it('reports a currency\'s real all-time balance even with zero activity this month', async () => {
+      // August had VND activity; September (the queried month) has none — the balance must
+      // still show, continuous from August, not disappear/reset to 0.
+      mockPrisma.income.findMany.mockResolvedValue([]);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+      mockPrisma.budget.findFirst.mockResolvedValue(null);
+      mockLedger.getCurrentBalances.mockResolvedValue({ VND: 92000000 });
+
+      const result = await service.getMonthlyReport('u-1', 9, 2026);
+
+      expect(result.currencies['VND'].currentBalance).toBe(92000000);
+      expect(result.currencies['VND'].totalIncome).toBe(0);
+      expect(result.currencies['VND'].totalExpense).toBe(0);
+    });
+
+    it('continues the cumulative balance across a month boundary (August -> September example)', async () => {
+      // August ending balance 92,000,000 VND. September: +10,000,000 income, -5,000,000 expense.
+      mockPrisma.income.findMany.mockResolvedValue([{ id: 'i1', amount: dec(10000000), currency: 'VND', source: null }]);
+      mockPrisma.expense.findMany.mockResolvedValue([{ id: 'e1', amount: dec(5000000), currency: 'VND', category: null }]);
+      mockPrisma.budget.findFirst.mockResolvedValue(null);
+      // The ledger's all-time balance already reflects August + September's transactions.
+      mockLedger.getCurrentBalances.mockResolvedValue({ VND: 97000000 });
+
+      const result = await service.getMonthlyReport('u-1', 9, 2026);
+
+      expect(result.currencies['VND'].currentBalance).toBe(97000000);
+      expect(result.currencies['VND'].totalIncome).toBe(10000000);
+      expect(result.currencies['VND'].totalExpense).toBe(5000000);
+      expect(result.currencies['VND'].netSavings).toBe(5000000);
     });
   });
 
@@ -221,7 +286,7 @@ describe('FinanceService', () => {
         createdAt: new Date(), updatedAt: new Date(),
       };
       const expenses = [
-        { amount: dec(12000) },
+        { amount: dec(12000), currency: 'TWD' },
       ];
       mockPrisma.budget.findFirst.mockResolvedValue(budget);
       mockPrisma.expense.findMany.mockResolvedValue(expenses);
@@ -230,6 +295,26 @@ describe('FinanceService', () => {
 
       expect(result.isExceeded).toBe(true);
       expect(result.usedPercent).toBe(120);
+    });
+
+    it('ignores expenses in a different currency than the budget', async () => {
+      const budget = {
+        id: 'bud-1', userId: 'u-1', month: 6, year: 2026,
+        totalLimit: dec(10000), currency: 'TWD', categoryLimitsJson: null,
+        createdAt: new Date(), updatedAt: new Date(),
+      };
+      const expenses = [
+        { amount: dec(12000), currency: 'TWD' },
+        { amount: dec(50000000), currency: 'VND' },
+      ];
+      mockPrisma.budget.findFirst.mockResolvedValue(budget);
+      mockPrisma.expense.findMany.mockResolvedValue(expenses);
+
+      const result = await service.getBudgetStatus('u-1', 6, 2026);
+
+      // The VND expense must have zero effect on a TWD budget's totals.
+      expect(result.totalExpense).toBe(12000);
+      expect(result.isExceeded).toBe(true);
     });
 
     it('returns empty status when no budget exists', async () => {
@@ -244,23 +329,40 @@ describe('FinanceService', () => {
     });
   });
 
-  // ─── Cashflow Forecast ────────────────────────────────────────────────────────
+  // ─── Cashflow Forecast (finance.service.ts's own — not the one mobile calls, see ai.service.spec.ts) ──
 
   describe('getCashflowForecast', () => {
     it('returns projected savings based on 3-month average', async () => {
       mockPrisma.income.findMany.mockResolvedValue([
-        { amount: dec(30000) }, { amount: dec(30000) }, { amount: dec(30000) },
+        { amount: dec(30000), currency: 'TWD' }, { amount: dec(30000), currency: 'TWD' }, { amount: dec(30000), currency: 'TWD' },
       ]);
       mockPrisma.expense.findMany.mockResolvedValue([
-        { amount: dec(15000) }, { amount: dec(15000) }, { amount: dec(15000) },
+        { amount: dec(15000), currency: 'TWD' }, { amount: dec(15000), currency: 'TWD' }, { amount: dec(15000), currency: 'TWD' },
       ]);
 
       const result = await service.getCashflowForecast('u-1');
 
-      expect(result.averageMonthlyIncome).toBe(30000);
-      expect(result.averageMonthlyExpense).toBe(15000);
-      expect(result.projectedMonthlySavings).toBe(15000);
-      expect(result.projected6MonthSavings).toBe(90000);
+      expect(result.currencies['TWD'].averageMonthlyIncome).toBe(30000);
+      expect(result.currencies['TWD'].averageMonthlyExpense).toBe(15000);
+      expect(result.currencies['TWD'].projectedMonthlySavings).toBe(15000);
+      expect(result.currencies['TWD'].projected6MonthSavings).toBe(90000);
+    });
+
+    it('keeps each currency projection fully independent', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([
+        { amount: dec(90000000), currency: 'VND' },
+        { amount: dec(30000), currency: 'TWD' },
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([
+        { amount: dec(15000000), currency: 'VND' },
+        { amount: dec(9000), currency: 'TWD' },
+      ]);
+
+      const result = await service.getCashflowForecast('u-1');
+
+      expect(result.currencies['VND'].averageMonthlyIncome).toBe(30000000);
+      expect(result.currencies['TWD'].averageMonthlyIncome).toBe(10000);
+      expect(result.currencies['VND'].averageMonthlyIncome).not.toBe(result.currencies['TWD'].averageMonthlyIncome);
     });
 
     it('returns explanation when no data', async () => {
@@ -269,8 +371,8 @@ describe('FinanceService', () => {
 
       const result = await service.getCashflowForecast('u-1');
 
-      expect(result.projectedMonthlySavings).toBe(0);
       expect(result.explanation).toContain('No finance data');
+      expect(Object.keys(result.currencies)).toHaveLength(0);
     });
   });
 
@@ -284,19 +386,19 @@ describe('FinanceService', () => {
       const lastMonth = makeDate(lastMonthDate.getFullYear(), lastMonthDate.getMonth() + 1, 10);
 
       mockPrisma.income.findMany.mockResolvedValue([
-        { amount: dec(20000), receivedDate: thisMonth },
-        { amount: dec(10000), receivedDate: lastMonth },
+        { amount: dec(20000), currency: 'TWD', receivedDate: thisMonth },
+        { amount: dec(10000), currency: 'TWD', receivedDate: lastMonth },
       ]);
       mockPrisma.expense.findMany.mockResolvedValue([
-        { amount: dec(5000), expenseDate: thisMonth },
-        { amount: dec(4000), expenseDate: lastMonth },
+        { amount: dec(5000), currency: 'TWD', expenseDate: thisMonth },
+        { amount: dec(4000), currency: 'TWD', expenseDate: lastMonth },
       ]);
 
       const result = await service.getMonthlyTrend('u-1', 3);
 
       expect(result).toHaveLength(3);
-      const current = result[result.length - 1];
-      const previous = result[result.length - 2];
+      const current = result[result.length - 1].currencies['TWD'];
+      const previous = result[result.length - 2].currencies['TWD'];
       expect(current.totalIncome).toBe(20000);
       expect(current.totalExpense).toBe(5000);
       expect(current.netSavings).toBe(15000);
@@ -305,14 +407,31 @@ describe('FinanceService', () => {
       expect(previous.netSavings).toBe(6000);
     });
 
-    it('returns a zeroed bucket per month when there is no data', async () => {
+    it('keeps VND and TWD in separate per-bucket entries, never combined', async () => {
+      const now = new Date();
+      const thisMonth = makeDate(now.getFullYear(), now.getMonth() + 1, 10);
+
+      mockPrisma.income.findMany.mockResolvedValue([
+        { amount: dec(60000000), currency: 'VND', receivedDate: thisMonth },
+        { amount: dec(10000), currency: 'TWD', receivedDate: thisMonth },
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+
+      const result = await service.getMonthlyTrend('u-1', 1);
+
+      const bucket = result[0];
+      expect(bucket.currencies['VND'].totalIncome).toBe(60000000);
+      expect(bucket.currencies['TWD'].totalIncome).toBe(10000);
+    });
+
+    it('returns an empty currencies map per month when there is no data', async () => {
       mockPrisma.income.findMany.mockResolvedValue([]);
       mockPrisma.expense.findMany.mockResolvedValue([]);
 
       const result = await service.getMonthlyTrend('u-1', 6);
 
       expect(result).toHaveLength(6);
-      expect(result.every((r) => r.totalIncome === 0 && r.totalExpense === 0 && r.netSavings === 0)).toBe(true);
+      expect(result.every((r) => Object.keys(r.currencies).length === 0)).toBe(true);
     });
   });
 

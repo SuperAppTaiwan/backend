@@ -20,7 +20,8 @@
     "db:migrate": "prisma db push",
     "db:migrate:prod": "prisma db push",
     "db:studio": "prisma studio",
-    "db:seed": "ts-node prisma/seed.ts"
+    "db:seed": "ts-node prisma/seed.ts",
+    "seed:finance-demo": "ts-node scripts/seed-finance-demo.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../infrastructure/prisma/prisma.service.js';
 import { EventsService, EventType } from '../events/events.service.js';
 import { FinanceLedgerService, type LedgerBalances } from './finance-ledger.service.js';
+import { sumByCurrency } from './finance-currency.util.js';
 import { CreateIncomeSourceDto } from './dto/create-income-source.dto.js';
 import { UpdateIncomeSourceDto } from './dto/update-income-source.dto.js';
 import { CreateIncomeDto } from './dto/create-income.dto.js';
@@ -464,11 +465,22 @@ export class FinanceService {
 
   // ─── Reports ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Per-currency monthly report. No exchange-rate conversion exists in this app (see
+   * finance-ledger.service.ts), so income/expense/savings are computed independently per
+   * currency — never summed together — and `currentBalance` is the ledger's real, continuous,
+   * all-time balance for that currency (NOT reset by this month/year filter), so a currency with
+   * a real balance but zero activity this month still reports it correctly (e.g. August's ending
+   * VND balance is still September's opening VND balance). The currency set returned is every
+   * currency the user has EVER transacted in (from the all-time ledger) plus this month's
+   * budget's currency if it's a currency with no transactions yet, so a brand-new budget still
+   * shows up before the first transaction in it.
+   */
   async getMonthlyReport(userId: string, month: number, year: number) {
     const start = new Date(year, month - 1, 1);
     const end = new Date(year, month, 1);
 
-    const [incomes, expenses, budget] = await Promise.all([
+    const [incomes, expenses, budget, currentBalances] = await Promise.all([
       this.prisma.income.findMany({
         where: { userId, receivedDate: { gte: start, lt: end } },
         include: { source: true },
@@ -478,44 +490,71 @@ export class FinanceService {
         include: { category: true },
       }),
       this.prisma.budget.findFirst({ where: { userId, month, year } }),
+      this.ledger.getCurrentBalances(userId),
     ]);
 
-    const totalIncome = incomes.reduce((sum, i) => sum + toNum(i.amount), 0);
-    const totalExpense = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
-    const netSavings = totalIncome - totalExpense;
+    const currencies = new Set<string>(Object.keys(currentBalances));
+    for (const i of incomes) currencies.add(i.currency);
+    for (const e of expenses) currencies.add(e.currency);
+    if (budget) currencies.add(budget.currency);
 
-    const expenseByCategory: Record<string, number> = {};
-    for (const e of expenses) {
-      const key = e.category?.name ?? 'Uncategorized';
-      expenseByCategory[key] = (expenseByCategory[key] ?? 0) + toNum(e.amount);
+    const byCurrency: Record<string, {
+      currency: string;
+      currentBalance: number;
+      totalIncome: number;
+      totalExpense: number;
+      netSavings: number;
+      expenseByCategory: Record<string, number>;
+      incomeBySource: Record<string, number>;
+      budgetLimit: number | null;
+      budgetUsedPercent: number | null;
+    }> = {};
+
+    for (const currency of currencies) {
+      const monthIncomes = incomes.filter((i) => i.currency === currency);
+      const monthExpenses = expenses.filter((e) => e.currency === currency);
+
+      const totalIncome = monthIncomes.reduce((sum, i) => sum + toNum(i.amount), 0);
+      const totalExpense = monthExpenses.reduce((sum, e) => sum + toNum(e.amount), 0);
+
+      const expenseByCategory: Record<string, number> = {};
+      for (const e of monthExpenses) {
+        const key = e.category?.name ?? 'Uncategorized';
+        expenseByCategory[key] = (expenseByCategory[key] ?? 0) + toNum(e.amount);
+      }
+
+      const incomeBySource: Record<string, number> = {};
+      for (const i of monthIncomes) {
+        const key = i.source?.name ?? 'Other';
+        incomeBySource[key] = (incomeBySource[key] ?? 0) + toNum(i.amount);
+      }
+
+      const hasBudget = budget?.currency === currency;
+      const budgetLimit = hasBudget ? toNum(budget!.totalLimit) : null;
+      const budgetUsedPercent =
+        budgetLimit && budgetLimit > 0 ? Math.round((totalExpense / budgetLimit) * 100) : null;
+
+      byCurrency[currency] = {
+        currency,
+        currentBalance: currentBalances[currency] ?? 0,
+        totalIncome,
+        totalExpense,
+        netSavings: totalIncome - totalExpense,
+        expenseByCategory,
+        incomeBySource,
+        budgetLimit,
+        budgetUsedPercent,
+      };
     }
 
-    const incomeBySource: Record<string, number> = {};
-    for (const i of incomes) {
-      const key = i.source?.name ?? 'Other';
-      incomeBySource[key] = (incomeBySource[key] ?? 0) + toNum(i.amount);
-    }
-
-    const budgetLimit = budget ? toNum(budget.totalLimit) : null;
-    const budgetUsedPercent =
-      budgetLimit && budgetLimit > 0
-        ? Math.round((totalExpense / budgetLimit) * 100)
-        : null;
-
-    return {
-      month,
-      year,
-      currency: budget?.currency ?? 'TWD',
-      totalIncome,
-      totalExpense,
-      netSavings,
-      expenseByCategory,
-      incomeBySource,
-      budgetLimit,
-      budgetUsedPercent,
-    };
+    return { month, year, currencies: byCurrency };
   }
 
+  /**
+   * Budget status for the given month. A Budget row is single-currency (see schema — one budget
+   * per user per month/year, `currency` picks which currency it tracks), so expenses in any
+   * other currency must never count toward it — filtered by `budget.currency` before summing.
+   */
   async getBudgetStatus(userId: string, month: number, year: number) {
     const start = new Date(year, month - 1, 1);
     const end = new Date(year, month, 1);
@@ -525,17 +564,19 @@ export class FinanceService {
       this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: start, lt: end } } }),
     ]);
 
-    const totalExpense = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
-
     if (!budget) {
       return {
         budget: null,
-        totalExpense,
+        totalExpense: 0,
         remainingBudget: 0,
         usedPercent: 0,
         isExceeded: false,
       };
     }
+
+    const totalExpense = expenses
+      .filter((e) => e.currency === budget.currency)
+      .reduce((sum, e) => sum + toNum(e.amount), 0);
 
     const budgetLimit = toNum(budget.totalLimit);
     const remainingBudget = budgetLimit - totalExpense;
@@ -550,7 +591,7 @@ export class FinanceService {
     };
   }
 
-  /** Per-month income/expense/savings series for the trailing `months`, for trend charts. */
+  /** Per-month, per-currency income/expense/savings series for the trailing `months`, for trend charts. */
   async getMonthlyTrend(userId: string, months: number) {
     const now = new Date();
     const windowStart = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
@@ -561,25 +602,46 @@ export class FinanceService {
       this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: windowStart, lt: windowEnd } } }),
     ]);
 
-    const buckets: { month: number; year: number; totalIncome: number; totalExpense: number }[] = [];
+    const buckets: { month: number; year: number; currencies: Record<string, { totalIncome: number; totalExpense: number; netSavings: number }> }[] = [];
     for (let i = months - 1; i >= 0; i--) {
       const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      buckets.push({ month: d.getMonth() + 1, year: d.getFullYear(), totalIncome: 0, totalExpense: 0 });
+      buckets.push({ month: d.getMonth() + 1, year: d.getFullYear(), currencies: {} });
     }
     const findBucket = (d: Date) => buckets.find((b) => b.month === d.getMonth() + 1 && b.year === d.getFullYear());
+    const ensureCurrency = (
+      bucket: (typeof buckets)[number],
+      currency: string,
+    ) =>
+      bucket.currencies[currency] ??
+      (bucket.currencies[currency] = { totalIncome: 0, totalExpense: 0, netSavings: 0 });
 
     for (const inc of incomes) {
       const bucket = findBucket(inc.receivedDate);
-      if (bucket) bucket.totalIncome += toNum(inc.amount);
+      if (!bucket) continue;
+      const stats = ensureCurrency(bucket, inc.currency);
+      stats.totalIncome += toNum(inc.amount);
+      stats.netSavings = stats.totalIncome - stats.totalExpense;
     }
     for (const exp of expenses) {
       const bucket = findBucket(exp.expenseDate);
-      if (bucket) bucket.totalExpense += toNum(exp.amount);
+      if (!bucket) continue;
+      const stats = ensureCurrency(bucket, exp.currency);
+      stats.totalExpense += toNum(exp.amount);
+      stats.netSavings = stats.totalIncome - stats.totalExpense;
     }
 
-    return buckets.map((b) => ({ ...b, netSavings: b.totalIncome - b.totalExpense }));
+    return buckets;
   }
 
+  /**
+   * NOTE: not currently called by the mobile app (the "Dự báo dòng tiền" screen calls the
+   * richer, AI-backed `AIService.getCashflowForecast` at GET /ai/cashflow-forecast instead — see
+   * that method for the one users actually see). Kept and fixed for currency-mixing correctness
+   * anyway since it's still a live, tested, publicly-routed endpoint (GET
+   * /finance/cashflow-forecast) — every currency is projected independently, matching the rest
+   * of the Finance module, rather than leaving a second, inconsistent mixed-currency
+   * implementation reachable via the API.
+   */
   async getCashflowForecast(userId: string) {
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
@@ -594,34 +656,56 @@ export class FinanceService {
       }),
     ]);
 
-    const totalIncome = incomes.reduce((sum, i) => sum + toNum(i.amount), 0);
-    const totalExpense = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
-    const avgMonthlyIncome = totalIncome / 3;
-    const avgMonthlyExpense = totalExpense / 3;
-    const projectedMonthlySavings = avgMonthlyIncome - avgMonthlyExpense;
-    const projected6MonthSavings = projectedMonthlySavings * 6;
+    const totalIncomeByCurrency = sumByCurrency(incomes, (i) => toNum(i.amount), (i) => i.currency);
+    const totalExpenseByCurrency = sumByCurrency(expenses, (e) => toNum(e.amount), (e) => e.currency);
+    const currencies = new Set([...Object.keys(totalIncomeByCurrency), ...Object.keys(totalExpenseByCurrency)]);
 
-    let explanation: string;
-    if (incomes.length === 0 && expenses.length === 0) {
-      explanation = 'No finance data in the past 3 months. Record income and expenses to get a forecast.';
-    } else if (projectedMonthlySavings <= 0) {
-      explanation = `Your expenses (avg ${avgMonthlyExpense.toFixed(0)} TWD/mo) exceed income (avg ${avgMonthlyIncome.toFixed(0)} TWD/mo). Consider reducing expenses.`;
-    } else {
-      explanation = `Based on the past 3 months, you save an average of ${projectedMonthlySavings.toFixed(0)} TWD per month.`;
+    const forecasts: Record<string, {
+      averageMonthlyIncome: number;
+      averageMonthlyExpense: number;
+      projectedMonthlySavings: number;
+      projected6MonthSavings: number;
+      explanation: string;
+    }> = {};
+
+    for (const currency of currencies) {
+      const totalIncome = totalIncomeByCurrency[currency] ?? 0;
+      const totalExpense = totalExpenseByCurrency[currency] ?? 0;
+      const avgMonthlyIncome = totalIncome / 3;
+      const avgMonthlyExpense = totalExpense / 3;
+      const projectedMonthlySavings = avgMonthlyIncome - avgMonthlyExpense;
+
+      const explanation =
+        projectedMonthlySavings <= 0
+          ? `Your expenses (avg ${avgMonthlyExpense.toFixed(0)} ${currency}/mo) exceed income (avg ${avgMonthlyIncome.toFixed(0)} ${currency}/mo). Consider reducing expenses.`
+          : `Based on the past 3 months, you save an average of ${projectedMonthlySavings.toFixed(0)} ${currency} per month.`;
+
+      forecasts[currency] = {
+        averageMonthlyIncome: Math.round(avgMonthlyIncome),
+        averageMonthlyExpense: Math.round(avgMonthlyExpense),
+        projectedMonthlySavings: Math.round(projectedMonthlySavings),
+        projected6MonthSavings: Math.round(projectedMonthlySavings * 6),
+        explanation,
+      };
     }
 
     return {
       basedOnMonths: 3,
-      averageMonthlyIncome: Math.round(avgMonthlyIncome),
-      averageMonthlyExpense: Math.round(avgMonthlyExpense),
-      projectedMonthlySavings: Math.round(projectedMonthlySavings),
-      projected6MonthSavings: Math.round(projected6MonthSavings),
-      explanation,
+      currencies: forecasts,
+      explanation:
+        currencies.size === 0
+          ? 'No finance data in the past 3 months. Record income and expenses to get a forecast.'
+          : undefined,
     };
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+  // NOTE: getAverageMonthlyIncome/getAverageMonthlyExpense below intentionally still sum across
+  // currencies — they exist only to feed Goal projections (goals.service.ts), a module the
+  // currency-separation fix in this pass was not scoped to touch. Making Goal projections
+  // currency-aware would require changes to the Goal model/UI (which currency is a savings goal
+  // even denominated in?) that belong to a dedicated Goals-module pass, not this Finance one.
   async getAverageMonthlyIncome(userId: string): Promise<number> {
     const now = new Date();
     const threeMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 3, 1);
@@ -668,9 +752,13 @@ export class FinanceService {
       this.prisma.expense.findMany({ where: { userId, expenseDate: { gte: start, lt: end } } }),
     ]);
 
-    if (!budget) return;
+    // A Budget is single-currency (budget.currency); only expenses in that same currency can
+    // count toward it — a TWD budget must never be "exceeded" by VND spending.
+    if (!budget || budget.currency !== currency) return;
 
-    const totalExpense = expenses.reduce((sum, e) => sum + toNum(e.amount), 0);
+    const totalExpense = expenses
+      .filter((e) => e.currency === budget.currency)
+      .reduce((sum, e) => sum + toNum(e.amount), 0);
     if (totalExpense > toNum(budget.totalLimit)) {
       await this.events.publish({
         userId,

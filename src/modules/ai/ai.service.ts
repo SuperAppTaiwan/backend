@@ -547,13 +547,20 @@ export class AIService {
 
   // ─── Cashflow Forecast (AI-backed, deterministic fallback) ───────────────────
 
+  /**
+   * No exchange-rate conversion exists in this app — a user tracking both VND and TWD must get
+   * one fully independent forecast per currency, never one number blending both. Fetches the
+   * shared 6-month window once, then delegates the actual math (unchanged from before this
+   * currency-separation pass) to computeCashflowForecastForCurrency per currency present in the
+   * window, so the mobile "Dự báo dòng tiền" screen can render one card set per currency.
+   */
   async getCashflowForecast(userId: string) {
     const MONTHS = 6;
     const now = new Date();
     const windowStart = new Date(now.getFullYear(), now.getMonth() - MONTHS, 1);
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const [incomes, expenses, budgets] = await Promise.all([
+    const [allIncomes, allExpenses, allBudgets] = await Promise.all([
       this.prisma.income.findMany({ where: { userId, receivedDate: { gte: windowStart, lt: thisMonthStart } } }),
       this.prisma.expense.findMany({
         where: { userId, expenseDate: { gte: windowStart, lt: thisMonthStart } },
@@ -562,6 +569,47 @@ export class AIService {
       this.prisma.budget.findMany({ where: { userId }, orderBy: [{ year: 'desc' }, { month: 'desc' }], take: 1 }),
     ]);
 
+    const currencies = new Set<string>([
+      ...allIncomes.map((i) => i.currency),
+      ...allExpenses.map((e) => e.currency),
+    ]);
+
+    if (currencies.size === 0) {
+      // No data in ANY currency — a single deterministic empty-state forecast, same shape as a
+      // real per-currency entry so the mobile screen doesn't need a separate "totally empty" case.
+      const empty = await this.computeCashflowForecastForCurrency(
+        'VND', [], [], allBudgets, now, MONTHS,
+      );
+      return { basedOnMonths: 0, windowMonths: MONTHS, currencies: { VND: empty } };
+    }
+
+    const results: Record<string, Awaited<ReturnType<typeof this.computeCashflowForecastForCurrency>>> = {};
+    for (const currency of currencies) {
+      results[currency] = await this.computeCashflowForecastForCurrency(
+        currency,
+        allIncomes.filter((i) => i.currency === currency),
+        allExpenses.filter((e) => e.currency === currency),
+        allBudgets.filter((b) => b.currency === currency),
+        now,
+        MONTHS,
+      );
+    }
+
+    return {
+      basedOnMonths: Math.max(...Object.values(results).map((r) => r.basedOnMonths)),
+      windowMonths: MONTHS,
+      currencies: results,
+    };
+  }
+
+  private async computeCashflowForecastForCurrency(
+    currency: string,
+    incomes: { amount: { toString(): string }; receivedDate: Date }[],
+    expenses: { amount: { toString(): string }; expenseDate: Date; category: { name: string } | null }[],
+    budgets: { totalLimit: { toString(): string }; currency: string }[],
+    now: Date,
+    MONTHS: number,
+  ) {
     const toAmount = (v: { toString(): string }) => parseFloat(v.toString());
     const monthKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}`;
 
@@ -664,8 +712,9 @@ export class AIService {
       .filter(([, months]) => months.size >= recurringThreshold)
       .map(([name, months]) => ({ name, monthsSeen: months.size }));
 
+    // `budgets` is already pre-filtered to this currency by the caller (a Budget row is
+    // single-currency) — at most one can exist.
     const budget = budgets[0] ?? null;
-    const currency = budget?.currency ?? incomes[0]?.currency ?? expenses[0]?.currency ?? 'VND';
 
     let riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
     if (projectedMonthlySavings <= 0) riskLevel = 'HIGH';

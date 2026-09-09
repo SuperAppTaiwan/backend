@@ -41,11 +41,13 @@ export class FinanceLedgerService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Computes balanceBefore/balanceAfter for every income and expense the user has ever recorded,
-   * keyed by transaction id. Two queries total (all incomes, all expenses) regardless of how many
-   * rows are being displayed — not N+1, and safe to call once per request.
+   * Loads every income/expense the user has ever recorded, signed (+income/-expense) and
+   * grouped by currency in deterministic chronological order. Shared by computeBalances (needs
+   * the per-transaction running total) and getCurrentBalances (only needs the final total) so
+   * there is exactly one query + one sort implementation for "what are this user's transactions,
+   * in order" — the two callers can never disagree about ordering or which rows are included.
    */
-  async computeBalances(userId: string): Promise<Map<string, LedgerBalances>> {
+  private async loadEntriesByCurrency(userId: string): Promise<Map<string, LedgerEntry[]>> {
     const [incomes, expenses] = await Promise.all([
       this.prisma.income.findMany({
         where: { userId },
@@ -69,7 +71,6 @@ export class FinanceLedgerService {
       byCurrency.set(entry.currency, list);
     }
 
-    const result = new Map<string, LedgerBalances>();
     for (const list of byCurrency.values()) {
       // Deterministic chronological order: transaction date, then creation timestamp (same-day
       // transactions), then id (final tiebreaker for truly identical timestamps) — the balance
@@ -81,7 +82,21 @@ export class FinanceLedgerService {
         if (createdDiff !== 0) return createdDiff;
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       });
+    }
 
+    return byCurrency;
+  }
+
+  /**
+   * Computes balanceBefore/balanceAfter for every income and expense the user has ever recorded,
+   * keyed by transaction id. Two queries total (all incomes, all expenses) regardless of how many
+   * rows are being displayed — not N+1, and safe to call once per request.
+   */
+  async computeBalances(userId: string): Promise<Map<string, LedgerBalances>> {
+    const byCurrency = await this.loadEntriesByCurrency(userId);
+
+    const result = new Map<string, LedgerBalances>();
+    for (const list of byCurrency.values()) {
       let running = 0;
       for (const entry of list) {
         const balanceBefore = running;
@@ -90,6 +105,26 @@ export class FinanceLedgerService {
       }
     }
 
+    return result;
+  }
+
+  /**
+   * The current, continuous, all-time balance for every currency the user has ever transacted
+   * in — i.e. the ledger's terminal balanceAfter per currency. This is what "current balance"
+   * means throughout the Finance module: it is NEVER reset by a calendar-month boundary, and a
+   * currency with zero activity this month but a positive history still reports its real
+   * balance (see finance.service.ts's getMonthlyReport, which pairs this with this month's
+   * income/expense to give both "how much came in/out this month" and "how much do I actually
+   * have"). Reuses loadEntriesByCurrency so this can never disagree with computeBalances'
+   * per-transaction balanceAfter — summing a currency's signed entries is order-independent, but
+   * sharing the same source list guarantees it's exactly the same set of transactions.
+   */
+  async getCurrentBalances(userId: string): Promise<Record<string, number>> {
+    const byCurrency = await this.loadEntriesByCurrency(userId);
+    const result: Record<string, number> = {};
+    for (const [currency, list] of byCurrency) {
+      result[currency] = list.reduce((sum, entry) => sum + entry.signedAmount, 0);
+    }
     return result;
   }
 }

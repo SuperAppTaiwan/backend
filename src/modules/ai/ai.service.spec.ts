@@ -277,32 +277,34 @@ describe('AIService', () => {
     const monthDate = (offsetFromNow: number, day = 10) => new Date(now.getFullYear(), now.getMonth() + offsetFromNow, day);
 
     it('falls back to deterministic narrative/recommendations when no AI provider is available', async () => {
-      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '30000' }, receivedDate: monthDate(o) }));
+      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '30000' }, currency: 'TWD', receivedDate: monthDate(o) }));
       const expenses = [-1, -2, -3, -4, -5, -6].flatMap((o) => [
-        { amount: { toString: () => '10000' }, expenseDate: monthDate(o), category: { name: 'Ăn uống' } },
-        { amount: { toString: () => '5000' }, expenseDate: monthDate(o), category: { name: 'Di chuyển' } },
+        { amount: { toString: () => '10000' }, currency: 'TWD', expenseDate: monthDate(o), category: { name: 'Ăn uống' } },
+        { amount: { toString: () => '5000' }, currency: 'TWD', expenseDate: monthDate(o), category: { name: 'Di chuyển' } },
       ]);
       (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
       (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
       (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
 
       const result = await service.getCashflowForecast(USER_ID);
+      const twd = result.currencies['TWD'];
 
-      expect(result.provider).toBe('deterministic');
-      expect(result.averageMonthlyIncome).toBe(30000);
-      expect(result.averageMonthlyExpense).toBe(15000);
-      expect(result.projectedMonthlySavings).toBe(15000);
-      expect(result.riskLevel).toBe('LOW');
-      expect(result.trend).toBe('STABLE');
-      expect(result.biggestCategory).toEqual({ name: 'Ăn uống', amount: 60000, percent: 67 });
-      expect(result.recommendations.some((r) => r.includes('Ăn uống'))).toBe(true);
-      expect(result.narrative.length).toBeGreaterThan(0);
+      expect(twd.provider).toBe('deterministic');
+      expect(twd.averageMonthlyIncome).toBe(30000);
+      expect(twd.averageMonthlyExpense).toBe(15000);
+      expect(twd.projectedMonthlySavings).toBe(15000);
+      expect(twd.riskLevel).toBe('LOW');
+      expect(twd.trend).toBe('STABLE');
+      expect(twd.biggestCategory).toEqual({ name: 'Ăn uống', amount: 60000, percent: 67 });
+      expect(twd.recommendations.some((r: string) => r.includes('Ăn uống'))).toBe(true);
+      expect(twd.narrative.length).toBeGreaterThan(0);
     });
 
     it('flags HIGH risk when average expenses exceed average income', async () => {
-      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '10000' }, receivedDate: monthDate(o) }));
+      const incomes = [-1, -2, -3, -4, -5, -6].map((o) => ({ amount: { toString: () => '10000' }, currency: 'TWD', receivedDate: monthDate(o) }));
       const expenses = [-1, -2, -3, -4, -5, -6].map((o) => ({
         amount: { toString: () => '15000' },
+        currency: 'TWD',
         expenseDate: monthDate(o),
         category: null,
       }));
@@ -311,10 +313,11 @@ describe('AIService', () => {
       (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
 
       const result = await service.getCashflowForecast(USER_ID);
+      const twd = result.currencies['TWD'];
 
-      expect(result.riskLevel).toBe('HIGH');
-      expect(result.projectedMonthlySavings).toBeLessThan(0);
-      expect(result.recommendations.some((r) => r.includes('vượt thu nhập'))).toBe(true);
+      expect(twd.riskLevel).toBe('HIGH');
+      expect(twd.projectedMonthlySavings).toBeLessThan(0);
+      expect(twd.recommendations.some((r: string) => r.includes('vượt thu nhập'))).toBe(true);
     });
 
     it('returns a no-data narrative and skips the AI call when there is no history', async () => {
@@ -323,42 +326,67 @@ describe('AIService', () => {
       (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
 
       const result = await service.getCashflowForecast(USER_ID);
+      const vnd = result.currencies['VND'];
 
-      expect(result.provider).toBe('deterministic');
-      expect(result.biggestCategory).toBeNull();
-      expect(result.narrative).toContain('Chưa có dữ liệu');
+      expect(vnd.provider).toBe('deterministic');
+      expect(vnd.biggestCategory).toBeNull();
+      expect(vnd.narrative).toContain('Chưa có dữ liệu');
     });
 
     it('produces a forecast with LIMITED confidence from a single month of data instead of blocking', async () => {
-      const incomes = [{ amount: { toString: () => '20000' }, receivedDate: monthDate(-1) }];
-      const expenses = [{ amount: { toString: () => '8000' }, expenseDate: monthDate(-1), category: { name: 'Ăn uống' } }];
+      const incomes = [{ amount: { toString: () => '20000' }, currency: 'TWD', receivedDate: monthDate(-1) }];
+      const expenses = [{ amount: { toString: () => '8000' }, currency: 'TWD', expenseDate: monthDate(-1), category: { name: 'Ăn uống' } }];
       (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
       (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
       (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
 
       const result = await service.getCashflowForecast(USER_ID);
+      const twd = result.currencies['TWD'];
 
-      expect(result.basedOnMonths).toBe(1);
-      expect(result.confidence).toBe('LIMITED');
+      expect(twd.basedOnMonths).toBe(1);
+      expect(twd.confidence).toBe('LIMITED');
       // Averaged over the real 1-month span, not diluted by 5 empty months in a fixed 6-month divisor.
-      expect(result.averageMonthlyIncome).toBe(20000);
-      expect(result.averageMonthlyExpense).toBe(8000);
-      expect(result.trend).toBe('NOT_ENOUGH_DATA');
-      expect(result.narrative.length).toBeGreaterThan(0);
+      expect(twd.averageMonthlyIncome).toBe(20000);
+      expect(twd.averageMonthlyExpense).toBe(8000);
+      expect(twd.trend).toBe('NOT_ENOUGH_DATA');
+      expect(twd.narrative.length).toBeGreaterThan(0);
     });
 
     it('reports MODERATE confidence with 2-3 months of data', async () => {
-      const incomes = [-1, -2].map((o) => ({ amount: { toString: () => '20000' }, receivedDate: monthDate(o) }));
-      const expenses = [-1, -2].map((o) => ({ amount: { toString: () => '8000' }, expenseDate: monthDate(o), category: { name: 'Ăn uống' } }));
+      const incomes = [-1, -2].map((o) => ({ amount: { toString: () => '20000' }, currency: 'TWD', receivedDate: monthDate(o) }));
+      const expenses = [-1, -2].map((o) => ({ amount: { toString: () => '8000' }, currency: 'TWD', expenseDate: monthDate(o), category: { name: 'Ăn uống' } }));
+      (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
+      (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
+      (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
+
+      const result = await service.getCashflowForecast(USER_ID);
+      const twd = result.currencies['TWD'];
+
+      expect(twd.basedOnMonths).toBe(2);
+      expect(twd.confidence).toBe('MODERATE');
+      expect(twd.averageMonthlyIncome).toBe(20000);
+    });
+
+    it('keeps VND and TWD forecasts fully independent when both are present', async () => {
+      const incomes = [-1, -2, -3, -4].flatMap((o) => [
+        { amount: { toString: () => '30000000' }, currency: 'VND', receivedDate: monthDate(o) },
+        { amount: { toString: () => '20000' }, currency: 'TWD', receivedDate: monthDate(o) },
+      ]);
+      const expenses = [-1, -2, -3, -4].flatMap((o) => [
+        { amount: { toString: () => '10000000' }, currency: 'VND', expenseDate: monthDate(o), category: null },
+        { amount: { toString: () => '5000' }, currency: 'TWD', expenseDate: monthDate(o), category: null },
+      ]);
       (prisma.income.findMany as jest.Mock).mockResolvedValue(incomes);
       (prisma.expense.findMany as jest.Mock).mockResolvedValue(expenses);
       (prisma.budget.findMany as jest.Mock).mockResolvedValue([]);
 
       const result = await service.getCashflowForecast(USER_ID);
 
-      expect(result.basedOnMonths).toBe(2);
-      expect(result.confidence).toBe('MODERATE');
-      expect(result.averageMonthlyIncome).toBe(20000);
+      expect(Object.keys(result.currencies).sort()).toEqual(['TWD', 'VND']);
+      expect(result.currencies['VND'].averageMonthlyIncome).toBe(30000000);
+      expect(result.currencies['TWD'].averageMonthlyIncome).toBe(20000);
+      // Never a cross-currency blend like 30000000 + 20000.
+      expect(result.currencies['VND'].averageMonthlyIncome).not.toBe(30020000);
     });
   });
 });

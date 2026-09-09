@@ -184,4 +184,79 @@ describe('FinanceLedgerService', () => {
     const balances = await service.computeBalances('u-1');
     expect(balances.size).toBe(0);
   });
+
+  // ─── getCurrentBalances: the continuous, non-resetting, per-currency "current balance" ────
+
+  describe('getCurrentBalances', () => {
+    it('matches the task spec\'s worked example: VND continues across the month boundary', async () => {
+      // August: ends at 92,000,000 VND (modeled as one opening income, since there's no
+      // separate opening-balance field). September: +10,000,000 income, -5,000,000 expense.
+      mockPrisma.income.findMany.mockResolvedValue([
+        income('aug-opening', 92000000, '2026-08-01', '2026-08-01', 'VND'),
+        income('sep-income', 10000000, '2026-09-05', '2026-09-05', 'VND'),
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([
+        expense('sep-expense', 5000000, '2026-09-10', '2026-09-10', 'VND'),
+      ]);
+
+      const balances = await service.getCurrentBalances('u-1');
+
+      expect(balances['VND']).toBe(97000000);
+    });
+
+    it('matches the task spec\'s isolation example: VND and TWD both update independently', async () => {
+      // Starting balances 100,000,000 VND / 20,000 TWD, modeled as opening incomes.
+      mockPrisma.income.findMany.mockResolvedValue([
+        income('vnd-open', 100000000, '2026-01-01', '2026-01-01', 'VND'),
+        income('twd-open', 20000, '2026-01-01', '2026-01-01', 'TWD'),
+        income('vnd-in', 10000000, '2026-01-05', '2026-01-05', 'VND'),
+        income('twd-in', 2000, '2026-01-05', '2026-01-05', 'TWD'),
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([
+        expense('vnd-out', 5000000, '2026-01-03', '2026-01-03', 'VND'),
+        expense('twd-out', 500, '2026-01-03', '2026-01-03', 'TWD'),
+      ]);
+
+      const balances = await service.getCurrentBalances('u-1');
+
+      expect(balances['VND']).toBe(105000000);
+      expect(balances['TWD']).toBe(21500);
+    });
+
+    it('is unaffected by which calendar month the transactions fall in', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([
+        income('jan', 1000, '2026-01-01', '2026-01-01', 'TWD'),
+        income('jun', 1000, '2026-06-15', '2026-06-15', 'TWD'),
+        income('dec', 1000, '2026-12-31', '2026-12-31', 'TWD'),
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+
+      const balances = await service.getCurrentBalances('u-1');
+
+      expect(balances['TWD']).toBe(3000);
+    });
+
+    it('agrees with computeBalances\' terminal balanceAfter for the same data (single source of truth)', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([
+        income('i1', 500, '2026-01-01'),
+        income('i2', 1000, '2026-01-04'),
+      ]);
+      mockPrisma.expense.findMany.mockResolvedValue([
+        expense('e1', 200, '2026-01-02'),
+        expense('e2', 100, '2026-01-03'),
+      ]);
+
+      const perTransaction = await service.computeBalances('u-1');
+      const current = await service.getCurrentBalances('u-1');
+
+      expect(current['TWD']).toBe(perTransaction.get('i2')!.balanceAfter);
+    });
+
+    it('returns an empty object when the user has no transactions at all', async () => {
+      mockPrisma.income.findMany.mockResolvedValue([]);
+      mockPrisma.expense.findMany.mockResolvedValue([]);
+      const balances = await service.getCurrentBalances('u-1');
+      expect(balances).toEqual({});
+    });
+  });
 });
