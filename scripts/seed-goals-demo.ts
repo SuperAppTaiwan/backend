@@ -13,6 +13,9 @@
  * DATA SAFETY: same model as scripts/seed-finance-demo.ts — talks to the real HTTP API (never
  * touches Prisma directly), only ever touches the ONE user identified by SEED_FINANCE_EMAIL,
  * and is idempotent via a `metadataJson.seedMarker` tag checked before creating anything.
+ * Also carries the same REAL-ACCOUNT GUARD as seed-finance-demo.ts (see that file's header for
+ * the incident this responds to): refuses to create any goal if the account already has goals
+ * this script didn't create, unless run with --i-understand-this-is-a-real-account.
  *
  * Usage:
  *   SEED_FINANCE_EMAIL=user@example.com SEED_FINANCE_PASSWORD='...' \
@@ -23,6 +26,7 @@ const API_URL = process.env.SEED_API_URL ?? `http://localhost:${process.env.API_
 const EMAIL = process.env.SEED_FINANCE_EMAIL;
 const PASSWORD = process.env.SEED_FINANCE_PASSWORD;
 const MARKER = 'seed-goals-demo';
+const ACKNOWLEDGE_REAL_ACCOUNT = process.argv.includes('--i-understand-this-is-a-real-account');
 
 if (!EMAIL || !PASSWORD) {
   console.error('Set SEED_FINANCE_EMAIL and SEED_FINANCE_PASSWORD environment variables before running this script.');
@@ -85,6 +89,16 @@ async function main() {
   const token = await loginOrRegister();
 
   const existing = await api<Goal[]>('/goals', { token });
+  const nonSeedGoals = existing.filter((g) => g.metadataJson?.seedMarker !== MARKER);
+  if (nonSeedGoals.length > 0 && !ACKNOWLEDGE_REAL_ACCOUNT) {
+    console.error(
+      `REFUSING TO SEED: ${EMAIL} already has ${nonSeedGoals.length} goal(s) this script did not create. ` +
+        'This looks like a real account, not a throwaway demo account. Re-run with ' +
+        '--i-understand-this-is-a-real-account if you are certain, otherwise use a dedicated empty demo account.',
+    );
+    process.exit(1);
+  }
+
   if (existing.some((g) => g.metadataJson?.seedMarker === MARKER)) {
     console.log('Goals demo data already present for this user — skipping.');
     return;

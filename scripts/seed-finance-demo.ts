@@ -23,6 +23,18 @@
  *    marker. A second run detects existing marked rows for this user and exits without
  *    creating duplicates. Pass --force to add a second batch anyway (e.g. to stress-test with
  *    more data) — this still only ever ADDS rows, never deletes/overwrites existing ones.
+ *  - REAL-ACCOUNT GUARD (added after an incident where this script was run against a real user's
+ *    production account, injecting a fake "80,000,000 VND opening balance" and other fabricated
+ *    rows on top of real TPBank-linked transaction history — see the 2026-09-11 Finance
+ *    reconciliation report): before creating anything, this script now refuses to run if the
+ *    target account already has ANY income/expense record that is NOT tagged with this script's
+ *    own marker. The previous check only asked "have I (this script) already run for this
+ *    user" — it had no concept of "does this account already contain real, non-demo financial
+ *    history I have no business writing into." That is the actual safety property that matters,
+ *    and it's what's enforced now. Pass --i-understand-this-is-a-real-account to bypass this
+ *    specific guard in the rare legitimate case of seeding demo data onto a real account you
+ *    intend to keep demo-only going forward (e.g. a dedicated QA account you just created) —
+ *    never pass it for an account you or a real user actively uses.
  *
  * Usage:
  *   SEED_FINANCE_EMAIL=user@example.com SEED_FINANCE_PASSWORD='...' \
@@ -36,6 +48,7 @@ const API_URL = process.env.SEED_API_URL ?? `http://localhost:${process.env.API_
 const EMAIL = process.env.SEED_FINANCE_EMAIL;
 const PASSWORD = process.env.SEED_FINANCE_PASSWORD;
 const FORCE = process.argv.includes('--force');
+const ACKNOWLEDGE_REAL_ACCOUNT = process.argv.includes('--i-understand-this-is-a-real-account');
 const MARKER = '[seed-finance-demo]';
 
 if (!EMAIL || !PASSWORD) {
@@ -106,6 +119,25 @@ async function alreadySeeded(token: string): Promise<boolean> {
   );
 }
 
+/**
+ * The real safety check: does this account already contain financial history this script did
+ * NOT create? If so, this is very likely a real user's account, not a throwaway demo/QA
+ * account, and this script must refuse to write into it. This is independent of `alreadySeeded`
+ * above (which only answers "did *this script* already run here" — an account can have zero
+ * seed-marked rows and still be a real account with 40+ real transactions, which is exactly
+ * the incident this guard exists to prevent from recurring).
+ */
+async function hasPreExistingRealData(token: string): Promise<{ incomes: number; expenses: number }> {
+  const [incomes, expenses] = await Promise.all([
+    api<Income[]>('/finance/incomes', { token }),
+    api<Expense[]>('/finance/expenses', { token }),
+  ]);
+  return {
+    incomes: incomes.filter((i) => !i.note?.includes(MARKER)).length,
+    expenses: expenses.filter((e) => !e.note?.includes(MARKER)).length,
+  };
+}
+
 function iso(y: number, m: number, d: number): string {
   return new Date(Date.UTC(y, m - 1, d, 12)).toISOString();
 }
@@ -126,6 +158,19 @@ async function createExpense(
 
 async function main() {
   const token = await loginOrRegister();
+
+  const preExisting = await hasPreExistingRealData(token);
+  if ((preExisting.incomes > 0 || preExisting.expenses > 0) && !ACKNOWLEDGE_REAL_ACCOUNT) {
+    console.error(
+      `REFUSING TO SEED: ${EMAIL} already has ${preExisting.incomes} income and ${preExisting.expenses} expense ` +
+        'record(s) that this script did not create. This looks like a real account with real financial ' +
+        'history, not a throwaway demo account — seeding fake data on top of it would corrupt real balances ' +
+        '(this is exactly what happened before; see the script header comment).\n\n' +
+        'If you are certain this account is meant to be demo-only, re-run with ' +
+        '--i-understand-this-is-a-real-account to proceed anyway. Otherwise, use a dedicated empty demo account.',
+    );
+    process.exit(1);
+  }
 
   if (!FORCE && (await alreadySeeded(token))) {
     console.log('Finance demo data already present for this user — skipping (pass --force to add another batch).');
