@@ -333,7 +333,9 @@ describe('WritingNotebookService', () => {
       const stored = await decodeStrokes(args.data.strokesData);
       expect(stored.map((s) => s.id)).toEqual(['s1', 's2']);
       expect(stored[0].color).toBe('#1C1B29');
-      expect(args.data.preview.strokes).toHaveLength(2);
+      // Same-style strokes share one preview path — both are present as subpaths.
+      expect(args.data.preview.strokes).toHaveLength(1);
+      expect(args.data.preview.strokes[0].d.match(/M/g)).toHaveLength(2);
       expect(result).toEqual(expect.objectContaining({ id: 'p1', version: 5, strokeCount: 2 }));
       expect(events.publish).toHaveBeenCalledWith(
         expect.objectContaining({ eventType: EventType.WRITING_PAGE_UPDATED, payload: expect.objectContaining({ version: 5 }) }),

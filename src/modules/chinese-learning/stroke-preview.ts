@@ -8,7 +8,7 @@ export interface PreviewStroke {
   w: number;
   /** 1 when drawn with the highlighter (rendered translucent). */
   h?: 1;
-  /** SVG path data in integer preview units. */
+  /** SVG path data in integer preview units (may hold several strokes as M subpaths). */
   d: string;
 }
 
@@ -119,12 +119,19 @@ export function buildPagePreview(strokes: Stroke[]): PagePreview {
       break;
     }
     budget -= pts.length;
-    out.push({
-      c: strokes[i].color,
-      w: Math.max(1, Math.round(strokes[i].width * PREVIEW_SCALE)),
-      ...(strokes[i].tool === 'highlighter' && { h: 1 as const }),
-      d: toPath(pts),
-    });
+    const c = strokes[i].color;
+    const w = Math.max(1, Math.round(strokes[i].width * PREVIEW_SCALE));
+    const highlighter = strokes[i].tool === 'highlighter';
+    const prev = out[out.length - 1];
+    // Consecutive strokes with the same style share one path (several M
+    // subpaths): per-stroke objects were ~90% of a dense page's preview size
+    // (56 KB → a few KB in testing). Only CONSECUTIVE strokes merge, so
+    // z-order is preserved.
+    if (prev && prev.c === c && prev.w === w && !!prev.h === highlighter) {
+      prev.d += toPath(pts);
+    } else {
+      out.push({ c, w, ...(highlighter && { h: 1 as const }), d: toPath(pts) });
+    }
   }
 
   return { v: 1, strokes: out, ...(truncated && { truncated: true }) };

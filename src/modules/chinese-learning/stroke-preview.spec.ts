@@ -61,6 +61,13 @@ describe('buildPagePreview', () => {
     expect(preview.truncated).toBeUndefined();
   });
 
+  it('merges consecutive same-style strokes into one path but keeps z-order across styles', () => {
+    const red = (id: string): Stroke => ({ ...line(id, 3), color: '#FF0000' });
+    const preview = buildPagePreview([line('a', 3), line('b', 3), red('c'), line('d', 3)]);
+    expect(preview.strokes.map((s) => s.c)).toEqual(['#112233', '#FF0000', '#112233']);
+    expect(preview.strokes[0].d.match(/M/g)).toHaveLength(2);
+  });
+
   it('renders a single-point dot as a zero-length segment', () => {
     const dot: Stroke = { id: 'd', tool: 'pen', color: '#000000', width: 0.01, points: [[0.5, 0.5, 0]] };
     expect(buildPagePreview([dot]).strokes[0].d).toBe('M500 500L500 500');
