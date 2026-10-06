@@ -6,6 +6,12 @@
 // raw cap below is measured on the canonical (rounded) JSON BEFORE
 // compression, so the stored blob is always a small fraction of it.
 
+/**
+ * Max raw PUT body for a page, checked from Content-Length BEFORE the body is
+ * parsed (see page-request-size.middleware.ts). A little above the canonical
+ * cap below, since the client may send unrounded numbers.
+ */
+export const MAX_PAGE_REQUEST_BYTES = 10 * 1024 * 1024;
 /** Max canonical stroke JSON per page, in bytes (~8 MB). */
 export const MAX_STROKES_JSON_BYTES = 8 * 1024 * 1024;
 /** Hard ceiling on the compressed blob actually written to MongoDB. */

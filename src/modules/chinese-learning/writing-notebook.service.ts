@@ -6,9 +6,8 @@ import {
   CreateWritingNotebookDto,
   CreateWritingPageDto,
   UpdateWritingNotebookDto,
-  UpdateWritingPageDto,
 } from './dto/writing-notebook.dto.js';
-import { canonicalizeStrokes, serializeStrokes } from './stroke-validation.js';
+import { parsePageUpdateBody, serializeStrokes } from './stroke-validation.js';
 import { decodeStrokes, encodeStrokes } from './stroke-codec.js';
 import { buildPagePreview } from './stroke-preview.js';
 import { PAGE_LIST_DEFAULT_LIMIT, PAGE_LIST_MAX_LIMIT } from './writing-notebook.constants.js';
@@ -199,8 +198,9 @@ export class WritingNotebookService {
     return this.withNeighbours(userId, summary, await decodeStrokes(strokesData));
   }
 
-  async updatePage(userId: string, notebookId: string, pageId: string, dto: UpdateWritingPageDto) {
-    const strokes = canonicalizeStrokes(dto.strokes);
+  /** `body` is the raw request body ({ version, strokes }); validated here, see parsePageUpdateBody(). */
+  async updatePage(userId: string, notebookId: string, pageId: string, body: unknown) {
+    const { version: baseVersion, strokes } = parsePageUpdateBody(body);
     const strokesData = await encodeStrokes(serializeStrokes(strokes));
     const preview = buildPagePreview(strokes);
 
@@ -208,7 +208,7 @@ export class WritingNotebookService {
     // atomic conditional update, so two devices racing on the same page can
     // never both "win" against the same base version.
     const { count } = await this.prisma.writingNotebookPage.updateMany({
-      where: { id: pageId, notebookId, userId, version: dto.version },
+      where: { id: pageId, notebookId, userId, version: baseVersion },
       data: {
         strokesData,
         strokeCount: strokes.length,
@@ -224,7 +224,7 @@ export class WritingNotebookService {
       });
       if (!existing) throw new NotFoundException('Page not found');
       throw new ConflictException(
-        `Page version is stale (sent ${dto.version}, current ${existing.version}). Reload the page and retry.`,
+        `Page version is stale (sent ${baseVersion}, current ${existing.version}). Reload the page and retry.`,
       );
     }
 
@@ -232,7 +232,7 @@ export class WritingNotebookService {
     // Bumps the notebook's updatedAt so the notebook list sorts by recent writing.
     await this.prisma.writingNotebook.updateMany({ where: { id: notebookId, userId }, data: { updatedAt } });
 
-    const version = dto.version + 1;
+    const version = baseVersion + 1;
     await this.events.publish({
       userId,
       eventType: EventType.WRITING_PAGE_UPDATED,

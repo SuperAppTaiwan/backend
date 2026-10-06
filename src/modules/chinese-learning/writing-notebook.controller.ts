@@ -1,5 +1,6 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { RawBody } from './raw-body.decorator.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
 import { AuthUser } from '../auth/strategies/jwt.strategy.js';
@@ -74,13 +75,15 @@ export class WritingNotebookController {
 
   @Put(':id/pages/:pageId')
   @ApiOperation({ summary: 'Replace the page stroke set (409 if `version` is stale)' })
+  // @RawBody, not @Body: stroke payloads must bypass class-transformer — see parsePageUpdateBody().
+  @ApiBody({ type: UpdateWritingPageDto })
   updatePage(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
     @Param('pageId') pageId: string,
-    @Body() dto: UpdateWritingPageDto,
+    @RawBody() body: unknown,
   ) {
-    return this.service.updatePage(user.userId, id, pageId, dto);
+    return this.service.updatePage(user.userId, id, pageId, body);
   }
 
   @Delete(':id/pages/:pageId')

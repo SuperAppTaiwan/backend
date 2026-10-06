@@ -117,6 +117,27 @@ export function canonicalizeStrokes(input: unknown): Stroke[] {
   return out;
 }
 
+/**
+ * Validates a PUT /pages/:pageId body: `{ version, strokes }`, nothing else.
+ *
+ * Deliberately NOT run through the global ValidationPipe/class-transformer:
+ * with `transform: true`, plainToInstance deep-copies every nested value, and
+ * for stroke data that is hundreds of thousands of tiny arrays. Measured on a
+ * 9 MB body: JSON.parse 67 ms / +20 MB heap vs class-transformer + validation
+ * 2.6 s / +108 MB — enough to OOM-kill the 512 MB production instance on a
+ * large page (it did, during the post-deploy smoke test).
+ */
+export function parsePageUpdateBody(body: unknown): { version: number; strokes: Stroke[] } {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) fail('Body must be an object');
+  const { version, strokes, ...rest } = body as Record<string, unknown>;
+  const extra = Object.keys(rest);
+  if (extra.length) fail(`property ${extra[0]} should not exist`);
+  if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) {
+    fail('version must be a positive integer');
+  }
+  return { version, strokes: canonicalizeStrokes(strokes) };
+}
+
 /** Serializes canonical strokes, enforcing the raw byte cap (413 when exceeded). */
 export function serializeStrokes(strokes: Stroke[]): string {
   const json = JSON.stringify(strokes);

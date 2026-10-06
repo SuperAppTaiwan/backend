@@ -7,6 +7,7 @@ import compression from 'compression';
 import helmet from 'helmet';
 import { AppModule } from './app.module.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
+import { pageRequestSizeGuard } from './modules/chinese-learning/page-request-size.middleware.js';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -22,6 +23,8 @@ async function bootstrap() {
   // before ever reaching the AI, which the client then had no way to tell
   // apart from a genuine "no food" result. See food.controller.ts's
   // POST /food/ingredients/scan.
+  // Writing-notebook stroke uploads get a tighter cap, enforced BEFORE parsing.
+  app.use(pageRequestSizeGuard);
   app.useBodyParser('json', { limit: '15mb' });
   app.useBodyParser('urlencoded', { limit: '15mb', extended: true });
 

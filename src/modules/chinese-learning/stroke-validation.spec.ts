@@ -1,5 +1,7 @@
 import { BadRequestException, PayloadTooLargeException } from '@nestjs/common';
-import { canonicalizeStrokes, serializeStrokes } from './stroke-validation.js';
+import { canonicalizeStrokes, parsePageUpdateBody, serializeStrokes } from './stroke-validation.js';
+import { pageRequestSizeGuard } from './page-request-size.middleware.js';
+import { MAX_PAGE_REQUEST_BYTES } from './writing-notebook.constants.js';
 import { decodeStrokes, encodeStrokes } from './stroke-codec.js';
 import { MAX_STROKES_PER_PAGE } from './writing-notebook.constants.js';
 
@@ -79,5 +81,64 @@ describe('stroke codec', () => {
 
   it('decodes a missing blob as an empty page', async () => {
     expect(await decodeStrokes(null)).toEqual([]);
+  });
+});
+
+describe('parsePageUpdateBody', () => {
+  it('returns the version and canonical strokes', () => {
+    const out = parsePageUpdateBody({ version: 3, strokes: [valid()] });
+    expect(out.version).toBe(3);
+    expect(out.strokes[0].color).toBe('#FF0000');
+  });
+
+  it.each([
+    ['non-object body', 'x'],
+    ['array body', []],
+    ['missing version', { strokes: [] }],
+    ['non-integer version', { version: 1.5, strokes: [] }],
+    ['zero version', { version: 0, strokes: [] }],
+    ['string version', { version: '1', strokes: [] }],
+    ['unknown property', { version: 1, strokes: [], extra: true }],
+    ['missing strokes', { version: 1 }],
+  ])('rejects %s with 400', (_label, body) => {
+    expect(() => parsePageUpdateBody(body)).toThrow(BadRequestException);
+  });
+
+  it('never mutates the request body', () => {
+    const body = { version: 1, strokes: [valid()] };
+    const before = JSON.stringify(body);
+    parsePageUpdateBody(body);
+    expect(JSON.stringify(body)).toBe(before);
+  });
+});
+
+describe('pageRequestSizeGuard', () => {
+  const run = (method: string, path: string, length?: number) => {
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    pageRequestSizeGuard(
+      { method, path, originalUrl: path, headers: length === undefined ? {} : { 'content-length': String(length) } } as never,
+      res as never,
+      next,
+    );
+    return { res, next };
+  };
+  const pagePath = '/api/v1/chinese-learning/writing-notebooks/n1/pages/p1';
+
+  it('rejects an oversized page PUT with 413 before the body is parsed', () => {
+    const { res, next } = run('PUT', pagePath, MAX_PAGE_REQUEST_BYTES + 1);
+    expect(res.status).toHaveBeenCalledWith(413);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a page PUT within the limit', 'PUT', pagePath, MAX_PAGE_REQUEST_BYTES],
+    ['a page PUT without Content-Length', 'PUT', pagePath, undefined],
+    ['a large photo upload elsewhere', 'POST', '/api/v1/food/ingredients/scan', 14 * 1024 * 1024],
+    ['a large POST on the pages collection', 'POST', '/api/v1/chinese-learning/writing-notebooks/n1/pages', 14 * 1024 * 1024],
+  ])('lets through %s', (_label, method, path, length) => {
+    const { res, next } = run(method as string, path as string, length as number | undefined);
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
   });
 });
