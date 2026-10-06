@@ -13,6 +13,7 @@ import { FinanceModule } from './modules/finance/finance.module.js';
 import { GoalsModule } from './modules/goals/goals.module.js';
 import { LearningModule } from './modules/learning/learning.module.js';
 import { VocabNotebookModule } from './modules/vocab-notebook/vocab-notebook.module.js';
+import { ChineseLearningModule } from './modules/chinese-learning/chinese-learning.module.js';
 import { ScheduleModule } from './modules/schedule/schedule.module.js';
 import { AIModule } from './modules/ai/ai.module.js';
 import { NotificationsModule } from './modules/notifications/notifications.module.js';
@@ -36,6 +37,7 @@ import { ChineseStoryModule } from './modules/chinese-story/chinese-story.module
     GoalsModule,
     LearningModule,
     VocabNotebookModule,
+    ChineseLearningModule,
     ScheduleModule,
     AIModule,
     NotificationsModule,
